@@ -559,9 +559,9 @@ app.post(
         decoration = excluded.decoration,
         guilds = ?,
         bio = excluded.bio,
-        real_name = COALESCE(?, real_name),
-        location = COALESCE(?, location),
-        age = COALESCE(?, age),
+        real_name = COALESCE(?, people.real_name),
+        location = COALESCE(?, people.location),
+        age = COALESCE(?, people.age),
         last_updated = CURRENT_TIMESTAMP,
         is_archived = 0
     `,
