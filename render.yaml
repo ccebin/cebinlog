@@ -6,7 +6,8 @@ services:
     name: cebin-log
     runtime: node
     plan: free
-    buildCommand: npm install && npm run build
+    # NODE_ENV=production iken npm bazen devDeps atlar; vite bulunamaz (127).
+    buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
     envVars:
       - key: NODE_ENV
