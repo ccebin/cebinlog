@@ -1,0 +1,13 @@
+# Render.com ücretsiz Web Service — Blueprint olarak veya manuel ayar ile kullanın.
+# https://render.com/docs/free
+
+services:
+  - type: web
+    name: cebin-log
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
