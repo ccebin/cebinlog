@@ -466,6 +466,41 @@ app.delete(
   }),
 );
 
+// --- GEOCODING (Nominatim; tarayıcıdan doğrudan istek CORS yüzünden bloklanır — sunucu proxy) ---
+app.get(
+  '/api/geocode',
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const q = req.query.q;
+    if (!q || String(q).trim() === '') {
+      return res.status(400).json({ error: 'q parametresi gerekli' });
+    }
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '5', 10) || 5, 1), 10);
+    const addressdetails = req.query.addressdetails === '0' ? '0' : '1';
+    try {
+      const r = await axios.get('https://nominatim.openstreetmap.org/search', {
+        params: {
+          format: 'json',
+          q: String(q),
+          limit,
+          addressdetails,
+        },
+        headers: {
+          'User-Agent':
+            process.env.NOMINATIM_USER_AGENT ||
+            'CebinLog/1.0 (intel panel; https://github.com/ccebin/cebinlog)',
+          'Accept-Language': 'tr,en',
+        },
+        timeout: 20000,
+      });
+      res.json(r.data);
+    } catch (err) {
+      console.error('Geocode proxy:', err.message);
+      res.status(502).json({ error: 'Konum araması şu an yapılamıyor.' });
+    }
+  }),
+);
+
 // --- DISCORD DATA ---
 app.get('/api/discord/user/:id', authenticate, async (req, res) => {
   const { id } = req.params;

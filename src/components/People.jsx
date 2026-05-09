@@ -2221,7 +2221,7 @@ function PersonCard({ p, setSelectedId, getAvatarUrl, getBannerUrl, getDecoratio
           }}
         />
         {/* Subtle Grain Overlay to mask low-res */}
-        <div className="absolute inset-0 opacity-[0.03] bg-[url('https://grainy-gradients.vercel.app/noise.svg')]" />
+        <div className="absolute inset-0 opacity-[0.03] bg-[url('/noise.svg')]" />
         {/* Overlay for readability */}
         <div className="absolute inset-0 bg-gradient-to-r from-black/90 via-black/40 to-black/90" />
       </div>
@@ -2362,7 +2362,10 @@ function LocationField({ value, onSave }) {
     setLoading(true)
     try {
       // Added addressdetails=1 to get individual components
-      const res = await axios.get(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&addressdetails=1`)
+      const res = await axios.get(`${API_BASE}/geocode`, {
+        params: { format: 'json', q: query, limit: 5, addressdetails: 1 },
+        headers: getHeaders(),
+      })
       setSuggestions(res.data)
       setShowDropdown(true)
     } catch (e) {

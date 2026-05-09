@@ -85,7 +85,10 @@ export default function WorldMap({ setSelectedId, setView }) {
       const coordCounts = new Map();
       for (const p of peopleWithLoc) {
         try {
-          const res = await axios.get(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(p.location)}&limit=1`);
+          const res = await axios.get(`${API_BASE}/geocode`, {
+            params: { format: 'json', q: p.location, limit: 1 },
+            headers: getHeaders(),
+          })
           if (res.data?.[0]) {
             let lat = parseFloat(res.data[0].lat), lng = parseFloat(res.data[0].lon);
             const key = `${lat.toFixed(4)},${lng.toFixed(4)}`;
