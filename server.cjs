@@ -531,11 +531,17 @@ app.post(
   '/api/people',
   authenticate,
   asyncHandler(async (req, res) => {
-    const { id, username, display_name, avatar, banner, decoration, guilds, bio, real_name, location, age, update = false } = req.body;
+    const { id, username, display_name, avatar, banner, decoration, guilds, bio, real_name, location, age: rawAge, update = false } = req.body;
     try {
       const existing = await db.get('SELECT id FROM people WHERE id = ?', [id]);
       if (existing && !update) {
         return res.status(400).json({ error: 'Bu kişi zaten sisteme kayıtlı.' });
+      }
+
+      let age = null;
+      if (rawAge !== undefined && rawAge !== null && rawAge !== '') {
+        const n = parseInt(String(rawAge), 10);
+        age = Number.isFinite(n) ? n : null;
       }
 
       const guildsJson = typeof guilds === 'string' ? guilds : guilds ? JSON.stringify(guilds) : null;

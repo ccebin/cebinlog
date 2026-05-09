@@ -456,11 +456,15 @@ export default function People({
   })
 
   const saveIdentityMutation = useMutation({
-    mutationFn: (data) => axios.post(`${API_BASE}/people`, { ...selectedPerson, ...data, update: true }, { headers: getHeaders() }),
+    mutationFn: (data) => {
+      if (!selectedPerson?.id) return Promise.reject(new Error('Kayıt henüz yüklenmedi.'))
+      return axios.post(`${API_BASE}/people`, { ...selectedPerson, ...data, update: true }, { headers: getHeaders() })
+    },
     onSuccess: () => {
       queryClient.invalidateQueries(['people'])
       queryClient.invalidateQueries(['person', selectedId])
-    }
+    },
+    onError: (err) => notify(err.response?.data?.error || err.message || 'Kaydedilemedi.', 'error'),
   })
 
   const deletePersonMutation = useMutation({
@@ -2266,11 +2270,35 @@ function PersonCard({ p, setSelectedId, getAvatarUrl, getBannerUrl, getDecoratio
 }
 function IdentityField({ label, value, onSave, icon: Icon = User }) {
   const [editing, setEditing] = useState(false)
-  const [val, setVal] = useState(value || '')
+  const isAge = label === 'Yaş'
+  const toInputStr = (v) => (v === null || v === undefined ? '' : String(v))
+
+  const [val, setVal] = useState(toInputStr(value))
+
+  React.useEffect(() => {
+    if (!editing) setVal(toInputStr(value))
+  }, [value, editing])
+
+  const displayText =
+    value === null || value === undefined || value === ''
+      ? 'Belirtilmedi'
+      : String(value)
 
   const handleSave = () => {
-    if (val !== (value || '')) {
-      onSave(val)
+    if (isAge) {
+      const trimmed = val.trim()
+      const next = trimmed === '' ? null : parseInt(trimmed, 10)
+      if (next !== null && !Number.isFinite(next)) {
+        setEditing(false)
+        return
+      }
+      const prev =
+        value === null || value === undefined || value === ''
+          ? null
+          : Number(value)
+      if (next !== prev) onSave(next)
+    } else {
+      if (toInputStr(val) !== toInputStr(value)) onSave(val)
     }
     setEditing(false)
   }
@@ -2282,23 +2310,26 @@ function IdentityField({ label, value, onSave, icon: Icon = User }) {
           <Icon className="w-3 h-3 text-primary/70" /> {label}
         </label>
         {!editing && (
-          <button onClick={() => setEditing(true)} className="text-[9px] text-primary font-bold opacity-0 group-hover:opacity-100 transition-opacity">DÜZENLE</button>
+          <button type="button" onClick={() => setEditing(true)} className="text-[9px] text-primary font-bold opacity-0 group-hover:opacity-100 transition-opacity">DÜZENLE</button>
         )}
       </div>
       {editing ? (
         <div className="flex gap-2">
           <input
-            type="text" value={val} onChange={(e) => setVal(e.target.value)}
+            type={isAge ? 'number' : 'text'}
+            min={isAge ? 0 : undefined}
+            value={val}
+            onChange={(e) => setVal(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') handleSave()
             }}
             className="flex-1 bg-secondary/80 border border-border rounded-lg px-3 py-1.5 text-xs outline-none focus:border-primary"
             autoFocus
           />
-          <button onClick={handleSave} className="bg-primary text-white p-1.5 rounded-lg active:scale-90 transition-transform"><Plus className="w-3.5 h-3.5" /></button>
+          <button type="button" onClick={handleSave} className="bg-primary text-white p-1.5 rounded-lg active:scale-90 transition-transform"><Plus className="w-3.5 h-3.5" /></button>
         </div>
       ) : (
-        <p className="text-sm font-semibold tracking-tight">{value || 'Belirtilmedi'}</p>
+        <p className="text-sm font-semibold tracking-tight">{displayText}</p>
       )}
     </div>
   )
@@ -2306,10 +2337,14 @@ function IdentityField({ label, value, onSave, icon: Icon = User }) {
 
 function LocationField({ value, onSave }) {
   const [editing, setEditing] = useState(false)
-  const [val, setVal] = useState(value || '')
+  const [val, setVal] = useState(value ?? '')
   const [suggestions, setSuggestions] = useState([])
   const [loading, setLoading] = useState(false)
   const [showDropdown, setShowDropdown] = useState(false)
+
+  React.useEffect(() => {
+    if (!editing) setVal(value ?? '')
+  }, [value, editing])
 
   React.useEffect(() => {
     const timer = setTimeout(() => {
@@ -2338,7 +2373,7 @@ function LocationField({ value, onSave }) {
   }
 
   const handleSave = () => {
-    if (val !== (value || '')) {
+    if (val !== (value ?? '')) {
       onSave(val)
     }
     setEditing(false)
