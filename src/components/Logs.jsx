@@ -1,7 +1,7 @@
 import React, { isValidElement } from 'react'
 import { logContentLooksLikeDeletion } from '../lib/logDetect'
 import { motion, AnimatePresence } from 'framer-motion'
-import { History, User, Activity, Clock, Shield, Search, Image as ImageIcon, Trash2, Video, Mic, FileText, Download } from 'lucide-react'
+import { History, User, Activity, Clock, Shield, Search, Image as ImageIcon, Trash2, Video, Mic, FileText, Download, ChevronLeft, ChevronRight, X } from 'lucide-react'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import axios from 'axios'
 import { cn } from '../lib/utils'
@@ -10,17 +10,130 @@ import LogRichContent from './LogRichContent'
 import { API_BASE, FILE_BASE } from '../lib/apiBase'
 const getHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem('nexus_token')}` })
 
+/** Global sistem logları sayfası — her sekmede gösterilecek kayıt */
+const GLOBAL_LOGS_PAGE_SIZE = 10
+/** Hızlı tıklanabilir en fazla ilk kaç sayfa (geri kalanı numara girerek) */
+const LOGS_QUICK_PAGES_MAX = 15
+
+function logMatchesPersonTag(log, tag) {
+  if (!tag?.id) return false
+  return String(log.target_id ?? '') === String(tag.id)
+}
+
+function personDiscordAvatarUrl(person, size = 32) {
+  if (!person?.id || !person?.avatar) return null
+  const ext = person.avatar.startsWith('a_') ? 'gif' : 'png'
+  return `https://cdn.discordapp.com/avatars/${person.id}/${person.avatar}.${ext}?size=${size}`
+}
+
 export default function Logs({ setView, setSelectedId, setHighlightLogId, setHighlightMediaId, user: propUser }) {
   const queryClient = useQueryClient()
   const user = propUser || JSON.parse(localStorage.getItem('nexus_user') || '{}')
   const [confirmClear, setConfirmClear] = React.useState(false)
   const [confirmingDelete, setConfirmingDelete] = React.useState(null)
   const [enlargedLogMedia, setEnlargedLogMedia] = React.useState(null)
+  const [logPageIndex, setLogPageIndex] = React.useState(0)
+  const [pageJumpInput, setPageJumpInput] = React.useState('')
+  const [personFilterTags, setPersonFilterTags] = React.useState([])
+  const [personFilterDraft, setPersonFilterDraft] = React.useState('')
 
   const { data: logs = [], isLoading, refetch } = useQuery({
     queryKey: ['global-logs'],
     queryFn: () => axios.get(`${API_BASE}/logs`, { headers: getHeaders() }).then(res => res.data)
   })
+
+  const { data: peopleList = [] } = useQuery({
+    queryKey: ['people'],
+    queryFn: () => axios.get(`${API_BASE}/people`, { headers: getHeaders() }).then(res => res.data)
+  })
+
+  const filteredLogs = React.useMemo(() => {
+    if (!personFilterTags.length) return logs
+    return logs.filter((log) => personFilterTags.some((tag) => logMatchesPersonTag(log, tag)))
+  }, [logs, personFilterTags])
+
+  const logPageCount = Math.max(1, Math.ceil(filteredLogs.length / GLOBAL_LOGS_PAGE_SIZE))
+  const paginatedLogs = React.useMemo(
+    () =>
+      filteredLogs.slice(
+        logPageIndex * GLOBAL_LOGS_PAGE_SIZE,
+        logPageIndex * GLOBAL_LOGS_PAGE_SIZE + GLOBAL_LOGS_PAGE_SIZE,
+      ),
+    [filteredLogs, logPageIndex],
+  )
+
+  const personFilterKey = personFilterTags.map((t) => t.id).join('\0')
+  const prevPersonFilterKeyRef = React.useRef(personFilterKey)
+
+  React.useEffect(() => {
+    const maxIdx = Math.max(0, logPageCount - 1)
+    const filterChanged = prevPersonFilterKeyRef.current !== personFilterKey
+    if (filterChanged) {
+      prevPersonFilterKeyRef.current = personFilterKey
+      setLogPageIndex(0)
+      return
+    }
+    setLogPageIndex((p) => Math.min(p, maxIdx))
+  }, [personFilterKey, logPageCount, filteredLogs.length])
+
+  React.useEffect(() => {
+    if (logPageIndex < LOGS_QUICK_PAGES_MAX) {
+      setPageJumpInput('')
+    } else {
+      setPageJumpInput(String(logPageIndex + 1))
+    }
+  }, [logPageIndex])
+
+  const quickPageButtonCount = Math.min(LOGS_QUICK_PAGES_MAX, logPageCount)
+  const pageJumpNum = parseInt(String(pageJumpInput).trim(), 10)
+  const pageJumpMatchesCurrent =
+    Number.isFinite(pageJumpNum) && pageJumpNum === logPageIndex + 1
+  const pageBeyondQuickRange = logPageIndex >= LOGS_QUICK_PAGES_MAX
+  const pageJumpInputGlow = pageJumpMatchesCurrent && pageBeyondQuickRange
+
+  const applyJumpToPage = React.useCallback(() => {
+    const raw = String(pageJumpInput).trim()
+    if (raw === '') return
+    const n = parseInt(raw, 10)
+    if (!Number.isFinite(n)) return
+    const idx = Math.min(Math.max(0, n - 1), logPageCount - 1)
+    setLogPageIndex(idx)
+  }, [pageJumpInput, logPageCount])
+
+  const selectedPersonIds = React.useMemo(
+    () => new Set(personFilterTags.map((t) => t.id)),
+    [personFilterTags],
+  )
+
+  const filteredPeopleForPicker = React.useMemo(() => {
+    const q = personFilterDraft.trim().toLowerCase()
+    if (!q) return []
+    let rows = peopleList.filter((p) => !selectedPersonIds.has(p.id))
+    rows = rows.filter(
+      (p) =>
+        String(p.display_name ?? '').toLowerCase().includes(q) ||
+        String(p.username ?? '').toLowerCase().includes(q) ||
+        String(p.id ?? '').toLowerCase().includes(q),
+    )
+    return rows.slice(0, 120)
+  }, [peopleList, personFilterDraft, selectedPersonIds])
+
+  const addPersonFilterTag = React.useCallback((person) => {
+    if (!person?.id) return
+    setPersonFilterTags((prev) => {
+      if (prev.some((t) => t.id === person.id)) return prev
+      return [
+        ...prev,
+        {
+          id: person.id,
+          display_name: person.display_name || person.username || person.id,
+          username: person.username || '',
+          avatar: person.avatar || null,
+        },
+      ]
+    })
+    setPersonFilterDraft('')
+  }, [])
 
   const deleteLogMutation = useMutation({
     mutationFn: (id) => axios.delete(`${API_BASE}/logs/${id}`, { headers: getHeaders() }),
@@ -114,18 +227,227 @@ export default function Logs({ setView, setSelectedId, setHighlightLogId, setHig
         </div>
       </div>
 
-      <div className="relative">
+      <div className="rounded-2xl border border-border/50 bg-secondary/15 px-4 py-3 space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-muted-foreground">
+            <Search className="h-3.5 w-3.5 shrink-0" aria-hidden />
+            Kişiye göre ara
+          </div>
+          {personFilterTags.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => setPersonFilterTags([])}
+              className="text-[10px] font-bold uppercase tracking-wider text-primary hover:underline"
+            >
+              Filtreyi temizle
+            </button>
+          ) : null}
+        </div>
+        <div
+          className={cn(
+            'flex min-h-10 flex-wrap items-center gap-1.5 rounded-xl border border-border bg-background/60 px-2 py-1.5',
+            'ring-offset-background focus-within:outline-none focus-within:ring-2 focus-within:ring-primary/25 focus-within:ring-offset-2',
+          )}
+        >
+          {personFilterTags.map((tag) => {
+            const av = personDiscordAvatarUrl(tag, 40)
+            return (
+              <span
+                key={tag.id}
+                className="inline-flex max-w-full items-center gap-1 rounded-full border border-primary/25 bg-primary/12 py-0.5 pl-1 pr-1 text-[11px] font-semibold text-foreground"
+              >
+                {av ? (
+                  <img
+                    src={av}
+                    alt=""
+                    className="h-6 w-6 shrink-0 rounded-full border border-border object-cover"
+                  />
+                ) : (
+                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border bg-secondary">
+                    <User className="h-3 w-3 text-muted-foreground" />
+                  </span>
+                )}
+                <span className="max-w-[140px] truncate">{tag.display_name}</span>
+                <button
+                  type="button"
+                  onClick={() => setPersonFilterTags((prev) => prev.filter((t) => t.id !== tag.id))}
+                  className="rounded-full p-0.5 text-muted-foreground hover:bg-primary/20 hover:text-foreground"
+                  aria-label={`Etiketi kaldır: ${tag.display_name}`}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            )
+          })}
+          <input
+            type="text"
+            value={personFilterDraft}
+            onChange={(e) => setPersonFilterDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                const first = filteredPeopleForPicker[0]
+                if (first) addPersonFilterTag(first)
+                return
+              }
+              if (e.key === 'Backspace' && personFilterDraft === '' && personFilterTags.length > 0) {
+                setPersonFilterTags((prev) => prev.slice(0, -1))
+              }
+            }}
+            className="min-w-[10rem] flex-1 border-0 bg-transparent py-1 text-xs outline-none placeholder:text-muted-foreground/60"
+            placeholder="Aramak için yazın — sonuçlar burada listelenir"
+            aria-label="Kişi ara"
+            title="Yazdıkça eşleşen kişiler görünür; seçmek için satıra tıklayın veya Enter ile ilkini ekleyin."
+          />
+        </div>
+        {personFilterDraft.trim() ? (
+          <div className="overflow-hidden rounded-xl border border-border/60 bg-background/40">
+            <div className="max-h-52 overflow-y-auto overscroll-contain">
+              {filteredPeopleForPicker.length === 0 ? (
+                <div className="px-3 py-4 text-center text-xs text-muted-foreground">
+                  {peopleList.length === 0 ? 'Kayıtlı kişi yok.' : 'Eşleşen kişi yok veya tümü zaten seçili.'}
+                </div>
+              ) : (
+                filteredPeopleForPicker.map((p) => {
+                  const av = personDiscordAvatarUrl(p, 64)
+                  const label = p.display_name || p.username || p.id
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => addPersonFilterTag(p)}
+                      className="flex w-full items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-secondary/80"
+                    >
+                      {av ? (
+                        <img src={av} alt="" className="h-9 w-9 shrink-0 rounded-full border border-border object-cover" />
+                      ) : (
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border bg-secondary">
+                          <User className="h-4 w-4 text-muted-foreground" />
+                        </span>
+                      )}
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-xs font-bold text-foreground">{label}</span>
+                        {p.username ? (
+                          <span className="block truncate text-[10px] text-muted-foreground">@{p.username}</span>
+                        ) : (
+                          <span className="block truncate font-mono text-[10px] text-muted-foreground/80">{p.id}</span>
+                        )}
+                      </span>
+                    </button>
+                  )
+                })
+              )}
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="relative w-full min-w-0">
+        {logPageCount > 1 ? (
+          <div className="mb-6 flex flex-col gap-3 rounded-2xl border border-border/50 bg-secondary/20 px-3 py-3 sm:flex-row sm:flex-wrap sm:items-center">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {Array.from({ length: quickPageButtonCount }, (_, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => {
+                    setLogPageIndex(i)
+                  }}
+                  className={cn(
+                    'min-h-8 min-w-8 rounded-lg px-2 py-1 text-[11px] font-bold tabular-nums transition-colors',
+                    logPageIndex === i
+                      ? 'bg-primary text-primary-foreground shadow-sm'
+                      : 'bg-background/60 text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  {i + 1}
+                </button>
+              ))}
+              <button
+                type="button"
+                disabled={logPageIndex <= 0}
+                onClick={() => {
+                  setLogPageIndex((p) => Math.max(0, p - 1))
+                }}
+                className={cn(
+                  'inline-flex min-h-8 min-w-8 items-center justify-center rounded-lg border border-border bg-background/60 text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-35',
+                )}
+                aria-label="Önceki sayfa"
+                title="Önceki sayfa"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
+              <form
+                className="flex flex-wrap items-center gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  applyJumpToPage()
+                }}
+              >
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  autoComplete="off"
+                  aria-label="Sayfa numarası"
+                  title="Sayfa numarası"
+                  value={pageJumpInput}
+                  onChange={(e) => {
+                    const v = e.target.value.replace(/\D/g, '')
+                    setPageJumpInput(v === '' ? '' : v)
+                  }}
+                  className={cn(
+                    'min-h-8 w-16 rounded-lg px-2 py-1.5 text-center text-[11px] font-bold tabular-nums transition-colors',
+                    pageJumpInputGlow
+                      ? 'border border-primary/30 bg-primary text-primary-foreground shadow-sm'
+                      : 'border border-border bg-background text-foreground',
+                  )}
+                />
+                <button
+                  type="button"
+                  disabled={logPageIndex >= logPageCount - 1}
+                  onClick={() => {
+                    setLogPageIndex((p) => Math.min(logPageCount - 1, p + 1))
+                  }}
+                  className={cn(
+                    'inline-flex min-h-8 min-w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-background/60 text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-35',
+                  )}
+                  aria-label="Sonraki sayfa"
+                  title="Sonraki sayfa"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+                <span className="text-[10px] tabular-nums text-muted-foreground">
+                  / {logPageCount}
+                </span>
+              </form>
+            </div>
+            <span className="text-[10px] tabular-nums text-muted-foreground sm:ml-auto">
+              {filteredLogs.length} kayıt
+              {personFilterTags.length > 0 && filteredLogs.length !== logs.length ? (
+                <span className="text-muted-foreground/70"> · {logs.length} toplam</span>
+              ) : null}
+            </span>
+          </div>
+        ) : null}
+
         <div className="absolute left-[21px] top-4 bottom-4 w-px bg-gradient-to-b from-primary/50 via-border to-transparent" />
 
-        <div className="space-y-8">
+        <div className="flex w-full min-w-0 flex-col space-y-8">
           {isLoading ? (
             [1, 2, 3, 4].map(i => <div key={i} className="h-24 rounded-2xl bg-secondary animate-pulse ml-12" />)
           ) : logs.length === 0 ? (
             <div className="ml-12 p-12 text-center border border-dashed border-border rounded-3xl text-muted-foreground italic">
               Henüz bir sistem kaydı bulunmuyor.
             </div>
+          ) : filteredLogs.length === 0 ? (
+            <div className="ml-12 p-12 text-center border border-dashed border-border rounded-3xl text-muted-foreground">
+              <p className="font-semibold text-foreground">Bu filtreye uyan kayıt yok.</p>
+              <p className="mt-2 text-sm italic">Etiketleri silin veya farklı isim / kullanıcı adı / ID deneyin.</p>
+            </div>
           ) : (
-            logs.map((log, i) => {
+            paginatedLogs.map((log, i) => {
               const isMediaDelete = logContentLooksLikeDeletion(log.content);
               const urlMatches = log.content.match(/\(URL: ([^, \)]+)/g) || [];
               const urls = urlMatches.map(m => {
@@ -143,7 +465,10 @@ export default function Logs({ setView, setSelectedId, setHighlightLogId, setHig
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: i * 0.05 }}
-                  className={cn("relative flex gap-6 group", log.is_admin_only && "opacity-90")}
+                  className={cn(
+                    'relative flex w-full min-w-0 flex-row gap-6 group',
+                    log.is_admin_only && 'opacity-90',
+                  )}
                 >
                   <div className="relative z-10 w-11 h-11 rounded-full bg-background border-4 border-border flex items-center justify-center group-hover:border-primary transition-colors overflow-hidden">
                     {log.author_avatar ? (
@@ -161,7 +486,7 @@ export default function Logs({ setView, setSelectedId, setHighlightLogId, setHig
                     )}
                   </div>
 
-                  <div className={cn("flex-1 border border-border rounded-[24px] p-6 transition-all shadow-xl shadow-black/10", log.is_admin_only ? "bg-primary/5 border-primary/20" : "bg-card/40 hover:bg-card/60")}>
+                  <div className={cn('min-w-0 flex-1 border border-border rounded-[24px] p-6 transition-all shadow-xl shadow-black/10', log.is_admin_only ? "bg-primary/5 border-primary/20" : "bg-card/40 hover:bg-card/60")}>
                     <div className="flex justify-between items-start mb-2">
                       <div className="flex items-center gap-3">
                         <div className="w-6 h-6 rounded-full overflow-hidden border border-primary/20 shrink-0">

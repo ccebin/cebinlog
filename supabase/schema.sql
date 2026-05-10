@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS people (
   real_name TEXT,
   location TEXT,
   age INTEGER,
+  location_lat DOUBLE PRECISION,
+  location_lng DOUBLE PRECISION,
   last_updated TIMESTAMPTZ DEFAULT NOW(),
   is_archived INTEGER DEFAULT 0
 );

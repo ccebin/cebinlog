@@ -11,6 +11,9 @@ import { API_BASE } from '../lib/apiBase'
 
 const getHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem('nexus_token')}` })
 
+/** useQuery data yokken `= []` her render’da yeni referans üretir → useEffect([people]) sonsuz döngü. */
+const EMPTY_PEOPLE = []
+
 // Leaflet fix
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
@@ -72,59 +75,119 @@ export default function WorldMap({ setSelectedId, setView }) {
     return () => observer.disconnect();
   }, []);
 
-  const { data: people = [] } = useQuery({
+  const { data: peopleData } = useQuery({
     queryKey: ['people'],
     queryFn: () => axios.get(`${API_BASE}/people`, { headers: getHeaders() }).then(res => res.data)
   })
+  const people = peopleData ?? EMPTY_PEOPLE
+
+  const globeArcs = useMemo(() => {
+    if (!locations?.length || locations.length < 2) return []
+    return locations.map((loc, i) => ({
+      startLat: loc.lat,
+      startLng: loc.lng,
+      endLat: locations[(i + 1) % locations.length].lat,
+      endLng: locations[(i + 1) % locations.length].lng,
+      color: ['#00f2fe', '#7c4dff'],
+    }))
+  }, [locations])
+
+  const peopleWithLocation = useMemo(
+    () => people.filter((p) => String(p.location ?? '').trim()),
+    [people],
+  )
+
+  const searchMatches = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (!q) return peopleWithLocation
+    return peopleWithLocation.filter((p) => {
+      const dn = (p.display_name || '').toLowerCase()
+      const un = (p.username || '').toLowerCase()
+      const loc = (p.location || '').toLowerCase()
+      const rn = (p.real_name || '').toLowerCase()
+      const id = String(p.id || '').toLowerCase()
+      return dn.includes(q) || un.includes(q) || loc.includes(q) || rn.includes(q) || id.includes(q)
+    })
+  }, [peopleWithLocation, searchQuery])
 
   useEffect(() => {
-    const geocode = async () => {
-      const peopleWithLoc = people.filter(p => p.location);
-      if (peopleWithLoc.length === 0) return;
-      const newLocs = [];
-      const coordCounts = new Map();
-      for (const p of peopleWithLoc) {
-        try {
-          const res = await axios.get(`${API_BASE}/geocode`, {
-            params: { format: 'json', q: p.location, limit: 1 },
-            headers: getHeaders(),
-          })
-          if (res.data?.[0]) {
-            let lat = parseFloat(res.data[0].lat), lng = parseFloat(res.data[0].lon);
-            const key = `${lat.toFixed(4)},${lng.toFixed(4)}`;
-            const count = coordCounts.get(key) || 0;
-            coordCounts.set(key, count + 1);
-            if (count > 0) { lat += Math.cos(count) * 0.0005; lng += Math.sin(count) * 0.0005; }
-            newLocs.push({ ...p, lat, lng });
-          }
-          await new Promise(r => setTimeout(r, 1000));
-        } catch (e) {}
+    const buildLocations = async () => {
+      const withLoc = people.filter((p) => String(p.location ?? '').trim())
+      if (withLoc.length === 0) {
+        setLocations([])
+        return
       }
-      setLocations(newLocs);
-    };
-    geocode();
-  }, [people]);
+      const newLocs = []
+      const coordCounts = new Map()
+      for (const p of withLoc) {
+        let lat
+        let lng
+        const cLat = p.location_lat ?? p.locationLat
+        const cLng = p.location_lng ?? p.locationLng
+        if (cLat != null && cLng != null && Number.isFinite(Number(cLat)) && Number.isFinite(Number(cLng))) {
+          lat = Number(cLat)
+          lng = Number(cLng)
+        } else {
+          try {
+            const res = await axios.get(`${API_BASE}/geocode`, {
+              params: { format: 'json', q: p.location, limit: 1 },
+              headers: getHeaders(),
+            })
+            if (!res.data?.[0]) continue
+            lat = parseFloat(res.data[0].lat)
+            lng = parseFloat(res.data[0].lon)
+          } catch {
+            continue
+          }
+          await new Promise((r) => setTimeout(r, 220))
+        }
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue
+        const key = `${lat.toFixed(4)},${lng.toFixed(4)}`
+        const count = coordCounts.get(key) || 0
+        coordCounts.set(key, count + 1)
+        let adjLat = lat
+        let adjLng = lng
+        if (count > 0) {
+          adjLat += Math.cos(count) * 0.0005
+          adjLng += Math.sin(count) * 0.0005
+        }
+        newLocs.push({ ...p, lat: adjLat, lng: adjLng })
+      }
+      setLocations(newLocs)
+    }
+    buildLocations()
+  }, [people])
 
-  const handleSelectTarget = (target) => {
-    const loc = locations.find(l => l.id === target.id);
-    if (loc) {
-      if (mode === '2d') setMapFocus({ center: [loc.lat, loc.lng], zoom: 14 });
-      else {
-        globeRef.current?.pointOfView({ lat: loc.lat, lng: loc.lng, altitude: 0.5 }, 1500);
-        setIsRotating(false);
+  const handleSelectTarget = async (person) => {
+    let loc = locations.find((l) => l.id === person.id)
+    if (!loc && String(person.location ?? '').trim()) {
+      try {
+        const res = await axios.get(`${API_BASE}/geocode`, {
+          params: { format: 'json', q: person.location, limit: 1 },
+          headers: getHeaders(),
+        })
+        if (res.data?.[0]) {
+          const lat = parseFloat(res.data[0].lat)
+          const lng = parseFloat(res.data[0].lon)
+          if (Number.isFinite(lat) && Number.isFinite(lng)) {
+            loc = { ...person, lat, lng }
+            setLocations((prev) => [...prev.filter((x) => x.id !== person.id), loc])
+          }
+        }
+      } catch {
+        /* Nominatim / ağ */
       }
     }
-    setSearchQuery('');
-    setIsSearchFocused(false);
-  };
-
-  const filteredLocations = useMemo(() => {
-    if (!searchQuery) return [];
-    return locations.filter(l => 
-      l.display_name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      l.id.toLowerCase().includes(searchQuery.toLowerCase())
-    );
-  }, [searchQuery, locations]);
+    if (loc) {
+      if (mode === '2d') setMapFocus({ center: [loc.lat, loc.lng], zoom: 14 })
+      else {
+        globeRef.current?.pointOfView({ lat: loc.lat, lng: loc.lng, altitude: 0.5 }, 1500)
+        setIsRotating(false)
+      }
+    }
+    setSearchQuery('')
+    setIsSearchFocused(false)
+  }
 
   const getAvatarUrl = p => {
     if (!p.avatar) return 'https://cdn.discordapp.com/embed/avatars/0.png';
@@ -161,30 +224,38 @@ export default function WorldMap({ setSelectedId, setView }) {
           </div>
 
           <AnimatePresence>
-            {isSearchFocused && filteredLocations.length > 0 && (
-              <motion.div 
+            {isSearchFocused && (
+              <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: 10 }}
                 className="absolute top-full left-0 right-0 mt-2 bg-background/80 backdrop-blur-2xl border border-border rounded-2xl overflow-hidden shadow-2xl z-[110]"
+                onMouseDown={(e) => e.preventDefault()}
               >
                 <div className="max-h-60 overflow-y-auto p-2 space-y-1 custom-scrollbar">
-                  {filteredLocations.map(loc => (
-                    <button
-                      key={loc.id}
-                      onClick={() => handleSelectTarget(loc)}
-                      className="w-full flex items-center gap-3 p-2 hover:bg-primary/10 rounded-xl transition-all text-left group"
-                    >
-                      <div className="w-10 h-10 rounded-full border border-border overflow-hidden bg-muted">
-                        <img src={getAvatarUrl(loc)} className="w-full h-full object-cover" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium truncate group-hover:text-primary transition-colors">{loc.display_name}</p>
-                        <p className="text-[10px] text-muted-foreground truncate">{loc.location || 'Konum belirtilmedi'}</p>
-                      </div>
-                      <Target className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
-                    </button>
-                  ))}
+                  {peopleWithLocation.length === 0 ? (
+                    <p className="p-3 text-xs text-muted-foreground">Konum bilgisi olan hedef yok. Kişi kartından konum ekleyin.</p>
+                  ) : searchMatches.length === 0 ? (
+                    <p className="p-3 text-xs text-muted-foreground">Aramanızla eşleşen hedef yok.</p>
+                  ) : (
+                    searchMatches.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => handleSelectTarget(p)}
+                        className="w-full flex items-center gap-3 p-2 hover:bg-primary/10 rounded-xl transition-all text-left group"
+                      >
+                        <div className="w-10 h-10 rounded-full border border-border overflow-hidden bg-muted">
+                          <img src={getAvatarUrl(p)} alt="" className="w-full h-full object-cover" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium truncate group-hover:text-primary transition-colors">{p.display_name}</p>
+                          <p className="text-[10px] text-muted-foreground truncate">{p.location || 'Konum'}</p>
+                        </div>
+                        <Target className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                      </button>
+                    ))
+                  )}
                 </div>
               </motion.div>
             )}
@@ -229,11 +300,16 @@ export default function WorldMap({ setSelectedId, setView }) {
               }
             }}
             width={dimensions.width} height={dimensions.height} backgroundColor="rgba(0,0,0,0)"
-            globeImageUrl="//unpkg.com/three-globe/example/img/earth-night.jpg"
-            bumpImageUrl="//unpkg.com/three-globe/example/img/earth-topology.png"
+            globeImageUrl="https://unpkg.com/three-globe/example/img/earth-night.jpg"
+            bumpImageUrl="https://unpkg.com/three-globe/example/img/earth-topology.png"
             showAtmosphere={true} atmosphereColor="#1a0b4d" atmosphereAltitude={0.28}
-            ringsData={locations} ringColor={() => '#7c4dff'} ringMaxRadius={2} ringPropagationSpeed={3}
-            arcsData={useMemo(() => locations.map((loc, i) => ({ startLat: loc.lat, startLng: loc.lng, endLat: locations[(i+1)%locations.length].lat, endLng: locations[(i+1)%locations.length].lng, color: ['#00f2fe', '#7c4dff'] })), [locations])}
+            ringsData={locations}
+            ringLat="lat"
+            ringLng="lng"
+            ringColor={() => '#7c4dff'}
+            ringMaxRadius={2}
+            ringPropagationSpeed={3}
+            arcsData={globeArcs}
             arcColor="color" arcDashLength={0.6} arcDashGap={1.5} arcDashAnimateTime={1500} arcStroke={0.6} arcCurve={0.4}
             onZoom={({ altitude }) => {
               if (altitude < 1.0) setIsRotating(false);
@@ -244,6 +320,8 @@ export default function WorldMap({ setSelectedId, setView }) {
               }
             }}
             htmlElementsData={locations}
+            htmlLat="lat"
+            htmlLng="lng"
             htmlElement={d => {
               const el = document.createElement('div');
               el.style.transform = 'translate(-50%, -50%)'; el.style.pointerEvents = 'auto'; el.style.cursor = 'pointer';

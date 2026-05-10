@@ -13,7 +13,7 @@ function cn(...inputs) {
 
 const getHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem('nexus_token')}` })
 
-/** Discord snowflake: 17–22 digits */
+/** Metnin tamamından yalnızca Discord snowflake’leri ayıklar (sunucu adı, etiket, virgül vb. göz ardı edilir). */
 function extractDiscordIds(text) {
   const matches = String(text || '').match(/\d{17,22}/g)
   return [...new Set(matches || [])]
@@ -32,8 +32,8 @@ export default function AddPersonModal({ isOpen, onClose, notify }) {
 
   const syncMutation = useMutation({
     mutationFn: (id) => axios.post(`${API_BASE}/people/${id}/sync-profile`, {}, { headers: getHeaders() }).then(res => res.data),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries(['people'])
+    onSuccess: async (data) => {
+      await queryClient.refetchQueries({ queryKey: ['people'] })
 
       if (!data.isNew) {
         setSyncError('Bu kişi zaten sistemde kayıtlı. Verileri Discord ile güncellendi.')
@@ -51,8 +51,9 @@ export default function AddPersonModal({ isOpen, onClose, notify }) {
   const bulkMutation = useMutation({
     mutationFn: (ids) =>
       axios.post(`${API_BASE}/people/bulk-import`, { ids }, { headers: getHeaders() }).then(res => res.data),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries(['people'])
+    onSuccess: async (data) => {
+      await queryClient.refetchQueries({ queryKey: ['people'] })
+      queryClient.invalidateQueries({ queryKey: ['connections'] })
       setBulkReport(data)
       const { summary } = data
       notify?.(
@@ -221,27 +222,26 @@ export default function AddPersonModal({ isOpen, onClose, notify }) {
                     setSyncError(null)
                     setBulkReport(null)
                   }}
-                  placeholder={'Her satıra bir ID veya virgülle ayırın:\n123456789012345678\n987654321098765432'}
+                  placeholder={'Örnek (karışık metin olabilir):\nSunucu Adı — Kullanıcı\nabc 123456789012345678 not\n987654321098765432, başka etiket'}
                   rows={8}
                   className="w-full resize-y min-h-[140px] bg-secondary/50 border border-border rounded-2xl px-4 py-3 outline-none focus:border-primary transition-all text-xs font-mono"
                 />
-                <p className="text-[10px] text-muted-foreground">
+                <p className="text-[10px] text-muted-foreground leading-relaxed">
+                  Sunucu adı, açıklama vb. içinde kaç ID varsa hepsi ayıklanır (17–22 haneli Discord sayıları).
                   Algılanan benzersiz ID: <span className="font-bold text-foreground">{parsedIds.length}</span>
-                  {parsedIds.length > 500 && <span className="text-destructive"> (en fazla 500 gönderilir)</span>}
                 </p>
               </div>
 
               <button
                 type="button"
                 onClick={() => {
-                  const ids = parsedIds.slice(0, 500)
-                  if (ids.length === 0) {
+                  if (parsedIds.length === 0) {
                     setSyncError('Dosyada veya metinde geçerli Discord ID yok (17–22 haneli sayılar).')
                     return
                   }
                   setSyncError(null)
                   setBulkReport(null)
-                  bulkMutation.mutate(ids)
+                  bulkMutation.mutate(parsedIds)
                 }}
                 disabled={parsedIds.length === 0 || bulkMutation.isPending}
                 className="w-full bg-primary text-white rounded-2xl py-4 font-bold flex items-center justify-center gap-2 hover:opacity-90 disabled:opacity-50 transition-all shadow-lg shadow-primary/20"
@@ -258,7 +258,7 @@ export default function AddPersonModal({ isOpen, onClose, notify }) {
 
               {bulkMutation.isPending && (
                 <p className="text-[10px] text-center text-muted-foreground">
-                  Discord API limitine uygun ara ile işleniyor; çok sayıda ID birkaç dakika sürebilir.
+                  İstekler paralel gidiyor; uzun listede süre beklenenden kısa olabilir. Sayfayı kapatmayın.
                 </p>
               )}
 

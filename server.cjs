@@ -10,6 +10,7 @@ const fs = require('fs');
 const db = require('./lib/db-adapter.cjs');
 const secure = require('./lib/secure-fields.cjs');
 const fc = require('./lib/field-crypto.cjs');
+const { syncUserData, bulkSyncDiscordUsers } = require('./lib/sync-discord-user.cjs');
 
 db.init();
 
@@ -27,6 +28,69 @@ const PORT = process.env.PORT || 3001;
 const SECRET = process.env.JWT_SECRET || 'nexus_secret';
 
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Nominatim kamu sunucusu: ~1 istek/sn; tüm /api/geocode çağrıları sıraya alınır. */
+const NOMINATIM_MIN_GAP_MS = Math.max(900, parseInt(process.env.NOMINATIM_MIN_GAP_MS || '1100', 10));
+let nominatimChain = Promise.resolve();
+
+function enqueueNominatim(fn) {
+  const job = nominatimChain.then(() => fn());
+  nominatimChain = job.catch(() => {}).then(() => sleep(NOMINATIM_MIN_GAP_MS));
+  return job;
+}
+
+async function nominatimSearch(params, headers) {
+  const url = 'https://nominatim.openstreetmap.org/search';
+  const maxAttempts = 6;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const r = await axios.get(url, { params, headers, timeout: 25000 });
+      return r.data;
+    } catch (err) {
+      const status = err.response?.status;
+      if (status === 429 && attempt < maxAttempts - 1) {
+        const ra = parseInt(err.response?.headers?.['retry-after'], 10);
+        const waitSec = Number.isFinite(ra) && ra > 0 ? ra : Math.min(120, 3 + attempt * 4);
+        if (attempt === 0) {
+          console.warn(`[Nominatim] 429 rate limit — ${waitSec}s bekleniyor (politika: max ~1 istek/sn)`);
+        }
+        await sleep(waitSec * 1000);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('Nominatim unreachable');
+}
+
+function nominatimHeaders() {
+  return {
+    'User-Agent':
+      process.env.NOMINATIM_USER_AGENT ||
+      'CebinLog/1.0 (intel panel; https://github.com/ccebin/cebinlog)',
+    'Accept-Language': 'tr,en',
+  };
+}
+
+/** Konum metninden bir kez koordinat çözümler (harita için DB’de saklanır). */
+async function resolveLocationCoords(plainText) {
+  const q = String(plainText || '').trim();
+  if (!q) return { lat: null, lng: null };
+  try {
+    const params = { format: 'json', q, limit: 1, addressdetails: '0' };
+    const data = await enqueueNominatim(() => nominatimSearch(params, nominatimHeaders()));
+    if (data?.[0]) {
+      const lat = parseFloat(data[0].lat);
+      const lng = parseFloat(data[0].lon);
+      if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+    }
+  } catch (e) {
+    console.warn('[Geocode] Konum koordinatları alınamadı:', e.message);
+  }
+  return { lat: null, lng: null };
+}
 
 const getCleanIp = (req) => {
   let ip = req.headers['x-forwarded-for'] || req.ip;
@@ -416,6 +480,70 @@ app.post(
   }),
 );
 
+/** Yerel/script ile oluşmuş NewUser_* / «User …» kayıtlarını veya tüm aktif hedefleri Discord API ile günceller. */
+app.post(
+  '/api/admin/discord-resync-targets',
+  authenticate,
+  asyncHandler(async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Yetkisiz erişim.' });
+
+    const mode = req.body?.mode === 'all' ? 'all' : 'stubs';
+    let ids;
+    if (mode === 'all') {
+      const rows = await db.all('SELECT id FROM people WHERE COALESCE(is_archived, 0) = 0');
+      ids = rows.map((r) => r.id);
+    } else {
+      const rows = await db.all(
+        'SELECT id, username, display_name FROM people WHERE COALESCE(is_archived, 0) = 0',
+      );
+      ids = rows
+        .filter((p) => {
+          const u = p.username != null ? String(p.username) : '';
+          const d = p.display_name != null ? String(p.display_name).trim() : '';
+          if (u.startsWith('NewUser_')) return true;
+          if (/^User \d+$/.test(d)) return true;
+          return false;
+        })
+        .map((p) => p.id);
+    }
+
+    const token = process.env.DISCORD_BOT_TOKEN;
+    if (!token || token === 'YOUR_TOKEN_HERE') {
+      return res.status(400).json({ error: 'DISCORD_BOT_TOKEN tanımlı değil.' });
+    }
+
+    if (ids.length === 0) {
+      return res.json({ success: true, mode, summary: { targets: 0, ok: 0, failed: 0 }, message: 'Eşleşen hedef yok.' });
+    }
+
+    const concParsed = parseInt(process.env.DISCORD_SYNC_CONCURRENCY || '12', 10);
+    const conc = Number.isFinite(concParsed) ? Math.min(40, Math.max(1, concParsed)) : 12;
+
+    const bulkRows = await bulkSyncDiscordUsers(ids, { concurrency: conc });
+
+    let ok = 0;
+    let failed = 0;
+    for (const row of bulkRows) {
+      if (row.ok) ok++;
+      else failed++;
+    }
+
+    await addLog(
+      null,
+      req.user.id,
+      'system',
+      `${req.user.display_name}, Discord toplu senk (${mode}): ${ok} başarılı, ${failed} hata (${ids.length} hedef).`,
+      1,
+    );
+
+    res.json({
+      success: true,
+      mode,
+      summary: { targets: ids.length, ok, failed },
+    });
+  }),
+);
+
 // --- IP BAN MANAGEMENT ---
 app.get(
   '/api/admin/banned-ips',
@@ -477,24 +605,25 @@ app.get(
     }
     const limit = Math.min(Math.max(parseInt(req.query.limit || '5', 10) || 5, 1), 10);
     const addressdetails = req.query.addressdetails === '0' ? '0' : '1';
+    const headers = nominatimHeaders();
+    const params = {
+      format: 'json',
+      q: String(q),
+      limit,
+      addressdetails,
+    };
     try {
-      const r = await axios.get('https://nominatim.openstreetmap.org/search', {
-        params: {
-          format: 'json',
-          q: String(q),
-          limit,
-          addressdetails,
-        },
-        headers: {
-          'User-Agent':
-            process.env.NOMINATIM_USER_AGENT ||
-            'CebinLog/1.0 (intel panel; https://github.com/ccebin/cebinlog)',
-          'Accept-Language': 'tr,en',
-        },
-        timeout: 20000,
-      });
-      res.json(r.data);
+      const data = await enqueueNominatim(() => nominatimSearch(params, headers));
+      res.json(data);
     } catch (err) {
+      const st = err.response?.status;
+      if (st === 429) {
+        console.error('[Nominatim] 429 — çok fazla istek; env ile NOMINATIM_MIN_GAP_MS artırın veya kendi Nominatim kurulumunu kullanın.');
+        return res.status(429).json({
+          error:
+            'Konum servisi geçici olarak istek limitine takıldı (429). Bir süre sonra tekrar deneyin veya haritada daha az hedef kullanın.',
+        });
+      }
       console.error('Geocode proxy:', err.message);
       res.status(502).json({ error: 'Konum araması şu an yapılamıyor.' });
     }
@@ -584,10 +713,20 @@ app.post(
       const guildsJson = typeof guilds === 'string' ? guilds : guilds ? JSON.stringify(guilds) : null;
       const pf = secure.encryptPersonFields(bio, real_name, location);
 
+      const plainLoc =
+        location !== undefined && location !== null ? String(location).trim() : '';
+      let locLat = null;
+      let locLng = null;
+      if (plainLoc) {
+        const coords = await resolveLocationCoords(plainLoc);
+        locLat = coords.lat;
+        locLng = coords.lng;
+      }
+
       await db.run(
         `
-      INSERT INTO people (id, username, display_name, avatar, banner, decoration, guilds, bio, real_name, location, age, last_updated)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      INSERT INTO people (id, username, display_name, avatar, banner, decoration, guilds, bio, real_name, location, age, location_lat, location_lng, last_updated)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(id) DO UPDATE SET
         username = excluded.username,
         display_name = excluded.display_name,
@@ -599,6 +738,8 @@ app.post(
         real_name = COALESCE(?, people.real_name),
         location = COALESCE(?, people.location),
         age = COALESCE(?, people.age),
+        location_lat = excluded.location_lat,
+        location_lng = excluded.location_lng,
         last_updated = CURRENT_TIMESTAMP,
         is_archived = 0
     `,
@@ -614,6 +755,8 @@ app.post(
           pf.real_name,
           pf.location,
           age,
+          locLat,
+          locLng,
           guildsJson,
           pf.real_name,
           pf.location,
@@ -636,11 +779,22 @@ app.post(
   }),
 );
 
-const BULK_IMPORT_MAX_IDS = 500;
-const BULK_IMPORT_DELAY_MS = 350;
+/** Discord kullanıcı/kanal/sunucu snowflake’leri: metin içinden yalnızca bu uzunluktaki sayı dizileri alınır. */
+function extractDiscordSnowflakes(blob) {
+  const s = String(blob ?? '');
+  const matches = s.match(/\d{17,22}/g);
+  return [...new Set(matches || [])];
+}
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function idsFromBulkPayload(raw) {
+  if (raw == null) return [];
+  if (Array.isArray(raw)) {
+    return extractDiscordSnowflakes(raw.map((x) => String(x ?? '')).join('\n'));
+  }
+  if (typeof raw === 'string') {
+    return extractDiscordSnowflakes(raw);
+  }
+  return [];
 }
 
 app.post(
@@ -653,31 +807,31 @@ app.post(
       return res.status(400).json({ error: 'Discord bot token yapılandırılmamış.' });
     }
 
-    let ids = [];
-    if (Array.isArray(raw)) {
-      ids = raw.map((x) => String(x).trim()).filter(Boolean);
-    } else if (typeof raw === 'string') {
-      const matches = raw.match(/\d{17,22}/g);
-      ids = matches || [];
+    const ids = idsFromBulkPayload(raw);
+    if (ids.length === 0) {
+      return res.status(400).json({
+        error:
+          'Geçerli Discord ID bulunamadı. Dosyada sunucu adı, not vb. olabilir; yalnızca 17–22 haneli ID sayıları kullanılır.',
+      });
     }
 
-    ids = [...new Set(ids)];
-    if (ids.length === 0) {
-      return res.status(400).json({ error: 'Geçerli Discord ID bulunamadı (satır veya virgülle ayrılmış 17–22 haneli sayılar).' });
-    }
-    if (ids.length > BULK_IMPORT_MAX_IDS) {
-      return res.status(400).json({ error: `Tek seferde en fazla ${BULK_IMPORT_MAX_IDS} ID gönderilebilir.` });
-    }
+    const concurrency = parseInt(
+      process.env.BULK_IMPORT_CONCURRENCY || process.env.DISCORD_SYNC_CONCURRENCY || '12',
+      10,
+    );
+    const syncConc = Number.isFinite(concurrency) ? Math.min(40, Math.max(1, concurrency)) : 12;
+
+    const bulkRows = await bulkSyncDiscordUsers(ids, { concurrency: syncConc });
 
     const results = [];
     let imported = 0;
     let updated = 0;
     let failed = 0;
 
-    for (let i = 0; i < ids.length; i++) {
-      const id = ids[i];
-      try {
-        const syncResult = await syncUserData(id);
+    for (const row of bulkRows) {
+      const { id } = row;
+      if (row.ok) {
+        const syncResult = row.syncResult;
         if (syncResult.isNew) {
           imported++;
           results.push({ id, status: 'imported' });
@@ -685,16 +839,16 @@ app.post(
           updated++;
           results.push({ id, status: 'updated' });
         }
-      } catch (err) {
+      } else {
         failed++;
-        const status = err.response?.status;
+        const err = row.error;
+        const status = err?.response?.status;
         const msg =
           status === 404
             ? 'Discord’da böyle bir kullanıcı yok veya bota görünmüyor.'
-            : err.message || 'Senkronizasyon hatası';
+            : err?.message || 'Senkronizasyon hatası';
         results.push({ id, status: 'failed', error: msg });
       }
-      if (i < ids.length - 1) await sleep(BULK_IMPORT_DELAY_MS);
     }
 
     res.json({
@@ -715,124 +869,6 @@ app.get(
   }),
 );
 
-/** Discord User object: `clan` and `primary_guild` are APIUserPrimaryGuild (identity_guild_id, tag, badge), not full guild objects with id/name/icon. */
-function guildTagFromDiscordUser(discordData) {
-  const raw = discordData.clan || discordData.primary_guild;
-  if (!raw) return null;
-  if (raw.identity_guild_id) {
-    const gid = raw.identity_guild_id;
-    return {
-      id: gid,
-      name: raw.tag || 'Tag',
-      icon: raw.badge ? `https://cdn.discordapp.com/clan-badges/${gid}/${raw.badge}.png` : null,
-      is_clan: true,
-    };
-  }
-  if (raw.id) {
-    const gid = raw.id;
-    const icon =
-      raw.icon && !String(raw.icon).startsWith('http')
-        ? `https://cdn.discordapp.com/icons/${gid}/${raw.icon}.png`
-        : raw.icon || null;
-    return {
-      id: gid,
-      name: raw.name || raw.tag || 'Guild',
-      icon,
-      is_clan: !!discordData.clan,
-    };
-  }
-  return null;
-}
-
-async function syncUserData(id) {
-  const token = process.env.DISCORD_BOT_TOKEN;
-  if (!token || token === 'YOUR_TOKEN_HERE') throw new Error('Bot token not configured');
-
-  const oldRow = await db.get('SELECT * FROM people WHERE id = ?', [id]);
-  const oldData = oldRow ? secure.decryptPerson(oldRow) : null;
-
-  const discordRes = await axios.get(`https://discord.com/api/v10/users/${id}`, {
-    headers: { Authorization: `Bot ${token}` },
-  });
-  const discordData = discordRes.data;
-
-  fs.appendFileSync('discord_debug.log', `[${new Date().toISOString()}] User ${id} Response: ${JSON.stringify(discordData)}\n`);
-
-  const autoGuilds = [];
-  const tagEntry = guildTagFromDiscordUser(discordData);
-  if (tagEntry) autoGuilds.push(tagEntry);
-
-  const newDisplayName = discordData.global_name || discordData.username;
-  const newGuildsStr = autoGuilds.length > 0 ? JSON.stringify(autoGuilds) : null;
-
-  const changes = [];
-  if (!oldData) {
-    changes.push(JSON.stringify({ type: 'initial', message: 'Bu Discord kullanıcısı ilk kez kayıt altına alındı.' }));
-  } else {
-    if (oldData.username !== discordData.username) {
-      changes.push(JSON.stringify({ type: 'username', old: oldData.username, new: discordData.username }));
-    }
-    if (oldData.display_name !== newDisplayName) {
-      changes.push(JSON.stringify({ type: 'display_name', old: oldData.display_name, new: newDisplayName }));
-    }
-    if (oldData.avatar !== discordData.avatar) {
-      changes.push(JSON.stringify({ type: 'avatar', old: oldData.avatar, new: discordData.avatar, userId: id }));
-    }
-    if (oldData.banner !== discordData.banner) {
-      changes.push(JSON.stringify({ type: 'banner', old: oldData.banner, new: discordData.banner, userId: id }));
-    }
-
-    const oldGuildsStr = oldData.guilds;
-    if (oldGuildsStr !== newGuildsStr) {
-      const oldGuilds = oldGuildsStr ? JSON.parse(oldGuildsStr) : [];
-      const newGuilds = autoGuilds;
-      changes.push(JSON.stringify({ type: 'guild', old: oldGuilds[0] || null, new: newGuilds[0] || null }));
-    }
-  }
-
-  const pf = secure.encryptPersonFields(discordData.bio || '', null, null);
-
-  await db.run(
-    `
-    INSERT INTO people (id, username, display_name, avatar, banner, decoration, guilds, bio, last_updated)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(id) DO UPDATE SET
-      username = excluded.username,
-      display_name = excluded.display_name,
-      avatar = excluded.avatar,
-      banner = excluded.banner,
-      decoration = excluded.decoration,
-      guilds = excluded.guilds,
-      bio = excluded.bio,
-      last_updated = CURRENT_TIMESTAMP
-  `,
-    [
-      id,
-      discordData.username,
-      newDisplayName,
-      discordData.avatar,
-      discordData.banner,
-      discordData.avatar_decoration_data?.asset,
-      newGuildsStr,
-      pf.bio,
-    ],
-  );
-
-  if (changes.length > 0) {
-    for (const c of changes) {
-      await db.run('INSERT INTO logs (target_id, type, content, user_id, is_admin_only) VALUES (?, ?, ?, ?, ?)', [
-        id,
-        'system',
-        secure.encryptLogFields(c, undefined, undefined).content,
-        null,
-        1,
-      ]);
-    }
-  }
-
-  return { guilds: autoGuilds, changes, isNew: !oldData };
-}
-
 app.post(
   '/api/people/:id/sync-profile',
   authenticate,
@@ -844,7 +880,20 @@ app.post(
       res.json({ success: true, person: updatedPerson, ...result });
     } catch (err) {
       console.error('Sync error:', err.message);
-      res.status(500).json({ error: 'Failed to sync Discord profile' });
+      const status = err.response?.status;
+      const msg = err.message || '';
+      if (msg.includes('17–23 haneli')) {
+        return res.status(400).json({ error: msg });
+      }
+      if (status === 404) {
+        return res.status(404).json({
+          error:
+            'Discord bu ID için kullanıcı döndürmedi (silinmiş, geçersiz veya hesap ortak sunucuda bota görünmüyor olabilir).',
+        });
+      }
+      res.status(status && status !== 500 ? status : 500).json({
+        error: msg || 'Discord profili senkronize edilemedi.',
+      });
     }
   }),
 );
@@ -854,6 +903,11 @@ app.get(
   authenticate,
   asyncHandler(async (req, res) => {
     try {
+      const rawLimit = parseInt(String(req.query.limit ?? ''), 10);
+      const rawOffset = parseInt(String(req.query.offset ?? ''), 10);
+      const limit = Math.min(150, Math.max(1, Number.isFinite(rawLimit) ? rawLimit : 50));
+      const offset = Math.max(0, Number.isFinite(rawOffset) ? rawOffset : 0);
+      const overfetch = limit + 1;
       const logs = await db.all(
         `
       SELECT logs.*, users.display_name as author, users.avatar as author_avatar, users.discord_id as author_discord_id
@@ -861,10 +915,17 @@ app.get(
       LEFT JOIN users ON logs.user_id = users.id
       WHERE target_id = ? AND type = 'system' 
       ORDER BY timestamp DESC
+      LIMIT ? OFFSET ?
     `,
-        [req.params.id],
+        [req.params.id, overfetch, offset],
       );
-      res.json(logs.map((l) => secure.decryptLog(l)));
+      const hasMore = logs.length > limit;
+      const slice = hasMore ? logs.slice(0, limit) : logs;
+      res.json({
+        items: slice.map((l) => secure.decryptLog(l)),
+        hasMore,
+        nextOffset: offset + slice.length,
+      });
     } catch (err) {
       console.error('System logs error:', err.message);
       fs.appendFileSync('discord_debug.log', `[${new Date().toISOString()}] System logs error for ${req.params.id}: ${err.message}\n`);
@@ -875,14 +936,20 @@ app.get(
 
 setInterval(async () => {
   console.log('[System] Running automated profile sync...');
-  const people = await db.all('SELECT id FROM people');
-  for (const p of people) {
-    try {
-      await syncUserData(p.id);
-      await new Promise((r) => setTimeout(r, 2000));
-    } catch (e) {
-      console.error(`[System] Failed to sync ${p.id}:`, e.message);
-    }
+  try {
+    const people = await db.all('SELECT id FROM people WHERE COALESCE(is_archived, 0) = 0');
+    const ids = people.map((p) => p.id);
+    if (ids.length === 0) return;
+    const conc = parseInt(
+      process.env.DISCORD_SYSTEM_SYNC_CONCURRENCY || process.env.DISCORD_SYNC_CONCURRENCY || '8',
+      10,
+    );
+    const syncConc = Number.isFinite(conc) ? Math.min(40, Math.max(1, conc)) : 8;
+    const rows = await bulkSyncDiscordUsers(ids, { concurrency: syncConc });
+    const ok = rows.filter((r) => r.ok).length;
+    console.log(`[System] Profil güncelleme tamamlandı (${ok}/${rows.length}).`);
+  } catch (e) {
+    console.error('[System] Otomatik senk başarısız:', e.message);
   }
 }, 30 * 60 * 1000);
 
@@ -1108,7 +1175,7 @@ app.get(
     const isAdmin = req.user.role === 'admin';
     const logs = await db.all(
       `
-    SELECT logs.*, users.display_name as author, users.avatar as author_avatar, users.discord_id as author_discord_id, people.display_name as target_name, people.avatar as target_avatar
+    SELECT logs.*, users.display_name as author, users.avatar as author_avatar, users.discord_id as author_discord_id, people.display_name as target_name, people.username as target_username, people.avatar as target_avatar
     FROM logs 
     LEFT JOIN users ON logs.user_id = users.id 
     LEFT JOIN people ON logs.target_id = people.id
@@ -1543,4 +1610,16 @@ if (process.env.NODE_ENV === 'production' && fs.existsSync(distPath)) {
   });
 }
 
-app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+async function ensurePeopleGeoColumns() {
+  if (!db.USE_PG) return;
+  try {
+    await db.run('ALTER TABLE people ADD COLUMN IF NOT EXISTS location_lat DOUBLE PRECISION');
+    await db.run('ALTER TABLE people ADD COLUMN IF NOT EXISTS location_lng DOUBLE PRECISION');
+  } catch (e) {
+    console.error('[DB] people.location_lat/location_lng:', e.message);
+  }
+}
+
+ensurePeopleGeoColumns().then(() => {
+  app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+});

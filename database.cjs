@@ -93,6 +93,8 @@ try { db.exec("ALTER TABLE logs ADD COLUMN is_admin_only INTEGER DEFAULT 0"); } 
 try { db.exec("ALTER TABLE people ADD COLUMN is_archived INTEGER DEFAULT 0"); } catch (e) {}
 try { db.exec("ALTER TABLE users ADD COLUMN approved INTEGER DEFAULT 0"); } catch (e) {}
 try { db.exec("ALTER TABLE media ADD COLUMN is_deleted INTEGER DEFAULT 0"); } catch (e) {}
+try { db.exec('ALTER TABLE people ADD COLUMN location_lat REAL'); } catch (e) {}
+try { db.exec('ALTER TABLE people ADD COLUMN location_lng REAL'); } catch (e) {}
 
 // Set initial admin as approved
 db.prepare("UPDATE users SET approved = 1 WHERE role = 'admin'").run();

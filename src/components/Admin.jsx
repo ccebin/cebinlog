@@ -16,6 +16,7 @@ import {
   MoreVertical,
   UserCheck,
   Share2,
+  RefreshCw,
   Settings,
   Download,
   Upload,
@@ -109,6 +110,22 @@ const Admin = ({ onUserUpdate }) => {
       setTimeout(() => window.location.reload(), 2000);
     },
     onError: (err) => notify(err.response?.data?.error || 'İçe aktarma başarısız.', 'error')
+  });
+
+  const discordResyncMutation = useMutation({
+    mutationFn: (mode) =>
+      axios
+        .post(`${API_BASE}/admin/discord-resync-targets`, { mode }, { headers: getHeaders() })
+        .then((res) => res.data),
+    onSuccess: async (data, mode) => {
+      const { summary } = data;
+      notify(
+        `Discord güncelleme (${mode === 'all' ? 'tüm aktifler' : 'stub kayıtlar'}): ${summary.ok} başarılı, ${summary.failed} hata / ${summary.targets} hedef.`,
+        summary.failed > 0 ? 'error' : 'success',
+      );
+      await queryClient.refetchQueries({ queryKey: ['people'] });
+    },
+    onError: (err) => notify(err.response?.data?.error || err.message || 'Senk başarısız.', 'error')
   });
 
   const handleExport = async () => {
@@ -212,6 +229,49 @@ const Admin = ({ onUserUpdate }) => {
               <Upload className="w-4 h-4" /> Yedeği Yükle
             </button>
           </div>
+        </div>
+      </div>
+
+      <div className="rounded-[24px] border border-border bg-card/40 backdrop-blur-xl p-6 space-y-3">
+        <div className="flex items-start gap-3">
+          <div className="p-2 rounded-xl bg-primary/10 text-primary shrink-0">
+            <RefreshCw className="w-5 h-5" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-black uppercase tracking-widest text-foreground">Hedef Discord profilleri</p>
+            <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+              «NewUser_…» veya «User …» görünümlü yer tutucuları Discord ile doldurur. Kayıtlı anahtar ID 17–23 hane rakam değilse senk çalışmaz (kırık/kısa kimlik); profili doğru Discord ID ile silip yeniden açın. Çok kayıtta barındırma süresi yetmeyebilir.
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 pt-2">
+          <button
+            type="button"
+            disabled={discordResyncMutation.isPending}
+            onClick={() => discordResyncMutation.mutate('stubs')}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-secondary hover:bg-secondary/80 border border-border text-xs font-black uppercase tracking-widest transition-colors disabled:opacity-50"
+          >
+            {discordResyncMutation.isPending ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            Stub kayıtları güncelle
+          </button>
+          <button
+            type="button"
+            disabled={discordResyncMutation.isPending}
+            onClick={() =>
+              setConfirmData({
+                title: 'TÜM HEDEFLERİ GÜNCELLE',
+                message:
+                  'Tüm aktif hedef kayıtlar Discord ile yenilenir. Büyük veritabanında uzun sürebilir. Devam?',
+                onConfirm: () => {
+                  discordResyncMutation.mutate('all');
+                  setConfirmData(null);
+                },
+              })
+            }
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary/15 hover:bg-primary/25 border border-primary/30 text-primary text-xs font-black uppercase tracking-widest transition-colors disabled:opacity-50"
+          >
+            Tüm aktif hedefleri güncelle
+          </button>
         </div>
       </div>
 

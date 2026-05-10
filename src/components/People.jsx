@@ -1,4 +1,4 @@
-import React, { useState, useRef, isValidElement } from 'react'
+import React, { useState, useRef, useMemo, isValidElement } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence, useMotionValue, useTransform, useSpring, useMotionTemplate } from 'framer-motion'
 import {
@@ -6,7 +6,7 @@ import {
   Link as LinkIcon, RefreshCw, X, Pin, Trash2,
   MapPin, Calendar, Fingerprint, ExternalLink, Image as ImageIcon,
   ChevronLeft, ChevronRight, Download, CheckCircle2, FileText, Pencil,
-  Video, Mic, File, Copy, Check, Shield, ArrowRight, Info, Activity
+  Video, Mic, File, Copy, Check, Shield, ArrowRight, Info, Activity, Loader2
 } from 'lucide-react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
@@ -20,6 +20,50 @@ import LogRichContent from './LogRichContent'
 import { logContentLooksLikeDeletion, logContentLooksLikeUpload } from '../lib/logDetect'
 import { API_BASE, FILE_BASE } from '../lib/apiBase'
 const getHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem('nexus_token')}` })
+
+const EMPTY_CONN_LIST = []
+
+/** Profil geçmişi sekmesinde gösterilen en güncel sistem logu sayısı (tek hafif istek) */
+const PROFILE_SYSTEM_LOGS_LIMIT = 10
+
+function discordAvatarUrl(person, size = 256) {
+  if (!person?.avatar) return 'https://cdn.discordapp.com/embed/avatars/0.png'
+  const isGif = person.avatar.startsWith('a_')
+  return `https://cdn.discordapp.com/avatars/${person.id}/${person.avatar}.${isGif ? 'gif' : 'png'}?size=${size}`
+}
+
+function discordBannerUrl(person, size = 1024) {
+  if (!person?.banner) return null
+  const isGif = person.banner.startsWith('a_')
+  return `https://cdn.discordapp.com/banners/${person.id}/${person.banner}.${isGif ? 'gif' : 'png'}?size=${size}`
+}
+
+function discordDecorationUrl(person) {
+  if (!person?.decoration) return null
+  return `https://cdn.discordapp.com/avatar-decoration-presets/${person.decoration}.png?size=240`
+}
+
+/** Yavaş açılan paneller için ortak yükleme görünümü */
+function NexusPanelLoading({ label, className }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={cn('flex flex-col items-center justify-center gap-4 py-10 px-6', className)}
+    >
+      <div className="relative flex h-14 w-14 items-center justify-center">
+        <span className="absolute inset-0 rounded-full border-2 border-primary/15" />
+        <span className="absolute inset-0 rounded-full border-2 border-transparent border-t-primary animate-spin" />
+        <Loader2 className="relative h-6 w-6 text-primary/90" aria-hidden />
+      </div>
+      {label ? (
+        <p className="text-center text-[10px] font-black uppercase tracking-[0.22em] text-muted-foreground">
+          {label}
+        </p>
+      ) : null}
+    </div>
+  )
+}
 
 export default function People({
   selectedId, setSelectedId,
@@ -58,12 +102,29 @@ export default function People({
   const [currentPage, setCurrentPage] = useState(1)
   const itemsPerPage = 14
 
-  const exportToPDF = () => {
-    const person = selectedPerson;
-    const personLogs = logs || [];
-    const personMediaList = (personMedia || []).filter(m =>
+  const exportToPDF = async () => {
+    const person = selectedPerson
+    if (!person || !selectedId) return
+    setIsExporting(true)
+    let mediaRows = personMedia
+    try {
+      mediaRows = await queryClient.fetchQuery({
+        queryKey: ['media', selectedId],
+        queryFn: () =>
+          axios
+            .get(`${API_BASE}/media/${selectedId}`, { headers: getHeaders() })
+            .then((res) => res.data),
+      })
+    } catch (e) {
+      console.error('PDF medya yüklemesi:', e)
+      mediaRows = []
+    } finally {
+      setIsExporting(false)
+    }
+    const personLogs = logs || []
+    const personMediaList = (mediaRows || []).filter((m) =>
       !m.url.match(/\.(mp4|webm|mp3|wav|pdf)$/i)
-    );
+    )
 
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
@@ -310,22 +371,47 @@ export default function People({
     queryFn: () => axios.get(`${API_BASE}/people`, { headers: getHeaders() }).then(res => res.data),
   })
 
-  const { data: selectedPerson } = useQuery({
+  const { data: selectedPerson, isPending: isPendingSelectedPerson } = useQuery({
     queryKey: ['person', selectedId],
     queryFn: () => axios.get(`${API_BASE}/people/${selectedId}`, { headers: getHeaders() }).then(res => res.data),
     enabled: !!selectedId
   })
 
-  const { data: logs = [] } = useQuery({
+  const { data: logs = [], isPending: isPendingLogs } = useQuery({
     queryKey: ['logs', selectedId],
     queryFn: () => axios.get(`${API_BASE}/logs/${selectedId}`, { headers: getHeaders() }).then(res => res.data),
     enabled: !!selectedId
   })
 
-  const { data: personMedia = [], isFetching: isFetchingMedia } = useQuery({
+  const logsIncludesHighlight = useMemo(() => {
+    if (highlightLogId == null) return false
+    const hid = highlightLogId
+    return logs.some(
+      (l) => Number(l.id) === Number(hid) || String(l.id) === String(hid),
+    )
+  }, [logs, highlightLogId])
+
+  /** Profil açılınca tüm sistem loglarını çekmeyi kes — sadece bu sekme veya sistem kaydı vurgusu */
+  const shouldLoadSystemLogs = Boolean(
+    selectedId
+    && (activeTab === 'logs'
+      || (highlightLogId != null && !logsIncludesHighlight)),
+  )
+
+  /** Medya listesi ağır; sadece medya sekmesi / önizleme / vurgu gerektiğinde yükle */
+  const shouldLoadMedia = Boolean(
+    selectedId
+    && (activeTab === 'media'
+      || highlightLogId != null
+      || highlightMediaId != null
+      || previewIndex !== null),
+  )
+
+  const { data: personMedia = [], isFetching: isFetchingMedia, isPending: isPendingMedia } = useQuery({
     queryKey: ['media', selectedId],
     queryFn: () => axios.get(`${API_BASE}/media/${selectedId}`, { headers: getHeaders() }).then(res => res.data),
-    enabled: !!selectedId
+    enabled: shouldLoadMedia,
+    staleTime: 60_000
   })
 
   const { data: allConnections = [] } = useQuery({
@@ -333,17 +419,57 @@ export default function People({
     queryFn: () => axios.get(`${API_BASE}/connections`, { headers: getHeaders() }).then(res => res.data)
   })
 
-  const { data: systemLogs = [] } = useQuery({
+  // O(1) lookup map'leri – cebinn gibi yüksek bağlantılı kişilerde
+  // people.find / allConnections.filter zinciri O(N²) olup modal açılışını kasıyordu.
+  const peopleById = useMemo(() => {
+    const m = new Map()
+    for (const p of people) m.set(p.id, p)
+    return m
+  }, [people])
+
+  const connectionsByPersonId = useMemo(() => {
+    const m = new Map()
+    for (const c of allConnections) {
+      if (!m.has(c.from_id)) m.set(c.from_id, [])
+      m.get(c.from_id).push(c)
+      if (c.to_id !== c.from_id) {
+        if (!m.has(c.to_id)) m.set(c.to_id, [])
+        m.get(c.to_id).push(c)
+      }
+    }
+    return m
+  }, [allConnections])
+
+  const { data: systemLogs = [], isPending: isPendingSystemLogs } = useQuery({
     queryKey: ['systemLogs', selectedId],
-    queryFn: () => axios.get(`${API_BASE}/people/${selectedId}/system-logs`, { headers: getHeaders() }).then(res => res.data),
-    enabled: !!selectedId
+    queryFn: async () => {
+      const { data } = await axios.get(`${API_BASE}/people/${selectedId}/system-logs`, {
+        params: { limit: PROFILE_SYSTEM_LOGS_LIMIT, offset: 0 },
+        headers: getHeaders(),
+      })
+      return data.items ?? []
+    },
+    enabled: shouldLoadSystemLogs,
+    staleTime: 60_000,
   })
+
+  const visibleSystemLogs = useMemo(() => systemLogs.slice(0, PROFILE_SYSTEM_LOGS_LIMIT), [systemLogs])
 
   // Auto-scroll to highlighted log
   React.useEffect(() => {
     if (highlightLogId && selectedId) {
       // Determine which tab the log belongs to
-      const logEntry = logs?.find(l => l.id === highlightLogId) || systemLogs?.find(l => l.id === highlightLogId);
+      const logEntry =
+        logs?.find(
+          (l) =>
+            Number(l.id) === Number(highlightLogId)
+            || String(l.id) === String(highlightLogId),
+        )
+        || systemLogs?.find(
+          (l) =>
+            Number(l.id) === Number(highlightLogId)
+            || String(l.id) === String(highlightLogId),
+        );
       if (logEntry) {
 
         // Check if this is a media-related log (Upload or Delete)
@@ -448,12 +574,15 @@ export default function People({
         notify('Bu kişi zaten sistemde kayıtlı. Verileri güncellendi.');
       }
 
-      if (data.person) {
-        queryClient.setQueryData(['person', data.person.id || selectedId], data.person);
+      const pid = data.person?.id || selectedId
+      if (data.person && pid) {
+        queryClient.setQueryData(['person', pid], data.person)
+        queryClient.setQueryData(['people'], (old) => {
+          if (!Array.isArray(old)) return old
+          return old.map((p) => (p.id === pid ? { ...p, ...data.person } : p))
+        })
       }
-      queryClient.invalidateQueries(['people']);
-      queryClient.invalidateQueries(['person', data.person?.id || selectedId]);
-      queryClient.invalidateQueries(['system-logs', data.person?.id || selectedId]);
+      if (pid) queryClient.invalidateQueries({ queryKey: ['systemLogs', pid] })
     },
     onError: (err) => {
       notify(err.response?.data?.error || 'Bir hata oluştu.', 'error')
@@ -461,15 +590,37 @@ export default function People({
   })
 
   const saveIdentityMutation = useMutation({
-    mutationFn: (data) => {
+    mutationFn: (patch) => {
       if (!selectedPerson?.id) return Promise.reject(new Error('Kayıt henüz yüklenmedi.'))
-      return axios.post(`${API_BASE}/people`, { ...selectedPerson, ...data, update: true }, { headers: getHeaders() })
+      return axios.post(`${API_BASE}/people`, { ...selectedPerson, ...patch, update: true }, { headers: getHeaders() })
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries(['people'])
-      queryClient.invalidateQueries(['person', selectedId])
+    onMutate: async (patch) => {
+      if (!selectedId || !selectedPerson?.id) return {}
+      await queryClient.cancelQueries({ queryKey: ['person', selectedId] })
+      await queryClient.cancelQueries({ queryKey: ['people'] })
+      const prevPerson = queryClient.getQueryData(['person', selectedId])
+      const prevPeople = queryClient.getQueryData(['people'])
+      if (prevPerson && typeof prevPerson === 'object') {
+        queryClient.setQueryData(['person', selectedId], { ...prevPerson, ...patch })
+      }
+      if (Array.isArray(prevPeople)) {
+        queryClient.setQueryData(
+          ['people'],
+          prevPeople.map((p) => (p.id === selectedId ? { ...p, ...patch } : p)),
+        )
+      }
+      return { prevPerson, prevPeople }
     },
-    onError: (err) => notify(err.response?.data?.error || err.message || 'Kaydedilemedi.', 'error'),
+    onError: (err, _patch, ctx) => {
+      if (ctx?.prevPerson !== undefined) queryClient.setQueryData(['person', selectedId], ctx.prevPerson)
+      if (ctx?.prevPeople !== undefined) queryClient.setQueryData(['people'], ctx.prevPeople)
+      notify(err.response?.data?.error || err.message || 'Kaydedilemedi.', 'error')
+    },
+    onSettled: (_d, _e, _patch, ctx) => {
+      if (!selectedId || ctx === undefined) return
+      queryClient.invalidateQueries({ queryKey: ['person', selectedId] })
+      queryClient.invalidateQueries({ queryKey: ['people'] })
+    },
   })
 
   const deletePersonMutation = useMutation({
@@ -508,22 +659,9 @@ export default function People({
     onSuccess: () => queryClient.invalidateQueries(['logs', selectedId])
   })
 
-  const getAvatarUrl = (person, size = 256) => {
-    if (!person.avatar) return 'https://cdn.discordapp.com/embed/avatars/0.png'
-    const isGif = person.avatar.startsWith('a_')
-    return `https://cdn.discordapp.com/avatars/${person.id}/${person.avatar}.${isGif ? 'gif' : 'png'}?size=${size}`
-  }
-
-  const getBannerUrl = (person, size = 1024) => {
-    if (!person.banner) return null
-    const isGif = person.banner.startsWith('a_')
-    return `https://cdn.discordapp.com/banners/${person.id}/${person.banner}.${isGif ? 'gif' : 'png'}?size=${size}`
-  }
-
-  const getDecorationUrl = (person) => {
-    if (!person.decoration) return null
-    return `https://cdn.discordapp.com/avatar-decoration-presets/${person.decoration}.png?size=240`
-  }
+  const getAvatarUrl = discordAvatarUrl
+  const getBannerUrl = discordBannerUrl
+  const getDecorationUrl = discordDecorationUrl
 
   const getShortLocation = (loc) => {
     if (!loc) return '';
@@ -587,8 +725,13 @@ export default function People({
       )}
 
       {isLoading ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {[1, 2, 3, 4, 5, 6].map(i => <div key={i} className="h-64 rounded-3xl bg-secondary animate-pulse" />)}
+        <div className="space-y-6">
+          <NexusPanelLoading label="Kayıtlar yükleniyor..." className="rounded-3xl border border-white/10 bg-white/[0.03]" />
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {[1, 2, 3, 4, 5, 6].map((i) => (
+              <div key={i} className="h-64 rounded-3xl bg-secondary/80 animate-pulse border border-white/5" />
+            ))}
+          </div>
         </div>
       ) : peopleQueryError ? null : people.length === 0 ? (
         <div className="rounded-3xl border border-white/10 bg-white/[0.03] px-8 py-16 text-center">
@@ -738,29 +881,49 @@ export default function People({
       {/* Expanded View Modal */}
       {typeof document !== 'undefined' && createPortal(
         <AnimatePresence>
-          {selectedId && selectedPerson && (
+          {selectedId && (
             <div className="fixed inset-0 z-[9000] flex items-center justify-center p-4">
               <motion.div
                 initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                 className="absolute inset-0 bg-background/95 backdrop-blur-xl"
                 onClick={() => setSelectedId(null)}
               />
-              <motion.div
-                initial={{ opacity: 0, y: 40, scale: 0.95 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: 40, scale: 0.95 }}
-                className="relative w-full max-w-5xl h-[85vh] rounded-[32px] border border-border bg-card shadow-[0_0_100px_-20px_rgba(124,77,255,0.2)] flex overflow-hidden"
-              >
+              {(isPendingSelectedPerson || !selectedPerson) ? (
+                <motion.div
+                  initial={{ opacity: 0, y: 24, scale: 0.96 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 24, scale: 0.96 }}
+                  className="relative z-10 w-full max-w-sm rounded-[28px] border border-border bg-card shadow-[0_0_80px_-20px_rgba(124,77,255,0.35)] overflow-hidden"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <NexusPanelLoading label="Profil açılıyor..." className="py-14" />
+                  <div className="px-6 pb-6 flex justify-center">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedId(null)}
+                      className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      Vazgeç
+                    </button>
+                  </div>
+                </motion.div>
+              ) : (
+                <motion.div
+                  initial={{ opacity: 0, y: 40, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 40, scale: 0.95 }}
+                  className="relative w-full max-w-5xl h-[85vh] rounded-[32px] border border-border bg-card shadow-[0_0_100px_-20px_rgba(124,77,255,0.2)] flex overflow-hidden"
+                >
                 {/* Left Side: Profile & Identity */}
                 <div className="w-80 border-r border-border flex flex-col overflow-y-auto custom-scrollbar bg-secondary/5">
                     <div
-                      className="h-48 bg-center bg-cover relative cursor-zoom-in"
+                      className="h-48 shrink-0 bg-center bg-cover relative cursor-zoom-in"
                       style={{ backgroundImage: getBannerUrl(selectedPerson) ? `url(${getBannerUrl(selectedPerson)})` : 'linear-gradient(to bottom, #7c4dff, #09090b)' }}
                       onClick={() => getBannerUrl(selectedPerson) && setEnlargedLogMedia({ url: getBannerUrl(selectedPerson, 2048) })}
                     >
                     <div className="absolute inset-0 bg-gradient-to-t from-card/90 via-card/20 to-transparent" />
                   </div>
-                  <div className="px-8 -mt-14 relative z-10">
+                  <div className="px-8 -mt-14 relative z-10 shrink-0">
                     <div className="relative inline-block group/avatar">
                       <img
                         src={getAvatarUrl(selectedPerson)}
@@ -863,146 +1026,25 @@ export default function People({
                         </div>
                       </div>
 
-                      {/* Compact Connections in Sidebar */}
-                      <div className="pt-6 border-t border-border space-y-4">
-                        <div className="flex justify-between items-center px-1">
-                          <h4 className="text-[10px] font-bold text-muted-foreground uppercase tracking-[0.2em] flex items-center gap-2">
-                            <LinkIcon className="w-3 h-3 text-primary" /> Bağlantılar
-                          </h4>
-                          <button
-                            onClick={() => setEditingConn(!editingConn)}
-                            className="text-[9px] font-bold text-primary hover:underline"
-                          >
-                            {editingConn ? 'KAPAT' : 'EKLE'}
-                          </button>
-                        </div>
-
-                        {editingConn && (
-                          <div className="p-3 bg-secondary/30 rounded-xl border border-primary/20 space-y-3 animate-in fade-in slide-in-from-top-1">
-                            <div className="relative">
-                              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-muted-foreground" />
-                              <input
-                                type="text"
-                                placeholder="Kişi Ara..."
-                                className="w-full bg-background border border-border rounded-lg pl-8 pr-3 py-1.5 text-[10px] outline-none focus:border-primary"
-                                value={connSearch}
-                                onChange={(e) => {
-                                  setConnSearch(e.target.value);
-                                  setConnTarget(''); // Reset selection on type
-                                }}
-                              />
-                            </div>
-
-                            {connSearch && !connTarget && (
-                              <div className="max-h-60 overflow-y-auto custom-scrollbar border border-border rounded-lg bg-background divide-y divide-border">
-                                {people
-                                  .filter(p => p.id !== selectedId && (p.display_name.toLowerCase().includes(connSearch.toLowerCase()) || p.username.toLowerCase().includes(connSearch.toLowerCase())))
-                                  .map(p => (
-                                    <button
-                                      key={p.id}
-                                      onClick={() => {
-                                        setConnTarget(p.id);
-                                        setConnSearch(p.display_name);
-                                      }}
-                                      className="w-full flex items-center gap-2 p-2 hover:bg-secondary transition-colors text-left"
-                                    >
-                                      <img src={getAvatarUrl(p)} className="w-5 h-5 rounded-full" />
-                                      <span className="text-[10px] font-medium truncate">{p.display_name}</span>
-                                    </button>
-                                  ))
-                                }
-                              </div>
-                            )}
-
-                            {connTarget && (
-                              <div className="flex items-center gap-2 p-2 bg-primary/5 border border-primary/20 rounded-lg">
-                                <img src={getAvatarUrl(people.find(p => p.id === connTarget))} className="w-5 h-5 rounded-full" />
-                                <span className="text-[10px] font-bold text-primary">Seçildi: {people.find(p => p.id === connTarget).display_name}</span>
-                              </div>
-                            )}
-
-                            <input
-                              type="text"
-                              placeholder="İlişki (Örn: Arkadaş)"
-                              className="w-full bg-background border border-border rounded-lg px-2 py-1.5 text-[10px] outline-none focus:border-primary"
-                              value={connType}
-                              onChange={(e) => setConnType(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter' && connTarget && connType) {
-                                  addConnectionMutation.mutate({ from_id: selectedId, to_id: connTarget, type: connType, note: '' });
-                                  setEditingConn(false);
-                                  setConnTarget('');
-                                  setConnSearch('');
-                                  setConnType('Arkadaş');
-                                }
-                              }}
-                            />
-                            <button
-                              onClick={() => {
-                                if (connTarget && connType) {
-                                  addConnectionMutation.mutate({ from_id: selectedId, to_id: connTarget, type: connType, note: '' });
-                                  setEditingConn(false);
-                                  setConnTarget('');
-                                  setConnSearch('');
-                                  setConnType('Arkadaş');
-                                }
-                              }}
-                              className="w-full bg-primary text-white py-1.5 rounded-lg text-[10px] font-bold hover:scale-[1.02] active:scale-95 transition-all"
-                            >
-                              BAĞLANTIYI KAYDET
-                            </button>
-                          </div>
-                        )}
-
-                        <div className="space-y-2">
-                          {allConnections.filter(c => c.from_id === selectedId || c.to_id === selectedId).map((conn, idx) => {
-                            const otherId = conn.from_id === selectedId ? conn.to_id : conn.from_id;
-                            const otherPerson = people.find(p => p.id === otherId);
-                            return (
-                              <div key={idx} className="flex items-center gap-3 p-2 rounded-lg bg-white/5 border border-white/5 group hover:bg-white/10 transition-colors relative">
-                                <img src={otherPerson?.avatar ? getAvatarUrl(otherPerson) : 'https://cdn.discordapp.com/embed/avatars/0.png'} className="w-6 h-6 rounded-full" />
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-[10px] font-bold truncate">{otherPerson?.display_name || 'Bilinmeyen'}</p>
-                                  <p className="text-[8px] text-primary font-bold uppercase">{conn.type}</p>
-                                </div>
-                                {confirmDeleteId === `${conn.from_id}-${conn.to_id}` ? (
-                                  <motion.div
-                                    initial={{ opacity: 0, scale: 0.9 }}
-                                    animate={{ opacity: 1, scale: 1 }}
-                                    className="absolute inset-0 bg-background/80 backdrop-blur-md flex flex-col items-center justify-center gap-2 rounded-lg z-20 border border-destructive/20"
-                                  >
-                                    <span className="text-[9px] font-black text-destructive uppercase tracking-widest">Silinsin mi?</span>
-                                    <div className="flex gap-2">
-                                      <button
-                                        onClick={() => deleteConnectionMutation.mutate({ from: conn.from_id, to: conn.to_id })}
-                                        className="px-3 py-1 bg-destructive text-white rounded-md text-[8px] font-bold hover:bg-destructive/80 transition-colors shadow-lg shadow-destructive/20"
-                                      >
-                                        SİL
-                                      </button>
-                                      <button
-                                        onClick={() => setConfirmDeleteId(null)}
-                                        className="px-3 py-1 bg-secondary text-foreground rounded-md text-[8px] font-bold hover:bg-secondary/80 transition-colors"
-                                      >
-                                        İPTAL
-                                      </button>
-                                    </div>
-                                  </motion.div>
-                                ) : (
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setConfirmDeleteId(`${conn.from_id}-${conn.to_id}`);
-                                    }}
-                                    className="absolute right-2 opacity-0 group-hover:opacity-100 p-1.5 hover:bg-destructive/10 rounded-lg text-muted-foreground hover:text-destructive transition-all"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
+                      {/* Compact Connections in Sidebar — memo: sekme değişince 858 satır yeniden reconcile edilmez */}
+                      <PersonModalConnectionsSection
+                        selectedId={selectedId}
+                        personConnections={connectionsByPersonId.get(selectedId) ?? EMPTY_CONN_LIST}
+                        people={people}
+                        peopleById={peopleById}
+                        editingConn={editingConn}
+                        setEditingConn={setEditingConn}
+                        connSearch={connSearch}
+                        setConnSearch={setConnSearch}
+                        connTarget={connTarget}
+                        setConnTarget={setConnTarget}
+                        connType={connType}
+                        setConnType={setConnType}
+                        addConnection={addConnectionMutation.mutate}
+                        confirmDeleteId={confirmDeleteId}
+                        setConfirmDeleteId={setConfirmDeleteId}
+                        deleteConnection={deleteConnectionMutation.mutate}
+                      />
 
                       <div className="pt-6 border-t border-border">
                         <p className="text-xs text-muted-foreground leading-relaxed italic opacity-80">
@@ -1072,6 +1114,7 @@ export default function People({
 
                   <div className="flex items-center gap-6 px-8 py-4 border-b border-border/50 bg-secondary/5">
                     <button
+                      type="button"
                       onClick={() => setActiveTab('notes')}
                       className={cn(
                         "text-[10px] font-bold uppercase tracking-[0.2em] transition-all relative py-2",
@@ -1079,9 +1122,12 @@ export default function People({
                       )}
                     >
                       İstihbarat Notları
-                      {activeTab === 'notes' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary shadow-[0_0_8px_rgba(var(--primary),0.5)]" />}
+                      {activeTab === 'notes' && (
+                        <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary shadow-[0_0_8px_rgba(var(--primary),0.5)]" />
+                      )}
                     </button>
                     <button
+                      type="button"
                       onClick={() => setActiveTab('media')}
                       className={cn(
                         "text-[10px] font-bold uppercase tracking-[0.2em] transition-all relative py-2",
@@ -1089,9 +1135,12 @@ export default function People({
                       )}
                     >
                       Medya Kanıtları
-                      {activeTab === 'media' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary shadow-[0_0_8px_rgba(var(--primary),0.5)]" />}
+                      {activeTab === 'media' && (
+                        <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary shadow-[0_0_8px_rgba(var(--primary),0.5)]" />
+                      )}
                     </button>
                     <button
+                      type="button"
                       onClick={() => setActiveTab('logs')}
                       className={cn(
                         "text-[10px] font-bold uppercase tracking-[0.2em] transition-all relative py-2",
@@ -1099,11 +1148,13 @@ export default function People({
                       )}
                     >
                       Profil Geçmişi
-                      {activeTab === 'logs' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary shadow-[0_0_8px_rgba(var(--primary),0.5)]" />}
+                      {activeTab === 'logs' && (
+                        <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary shadow-[0_0_8px_rgba(var(--primary),0.5)]" />
+                      )}
                     </button>
                   </div>
 
-                  <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">
+                  <div className="flex-1 overflow-y-auto p-8 custom-scrollbar bg-card/30">
                     {activeTab === 'notes' ? (
                       /* Notes Section */
                       <div className="space-y-6">
@@ -1137,6 +1188,9 @@ export default function People({
                           </div>
                         </div>
 
+                        {isPendingLogs ? (
+                          <NexusPanelLoading label="Not geçmişi yükleniyor..." className="rounded-[24px] border border-border/50 bg-secondary/10 min-h-[200px]" />
+                        ) : (
                         <div className="space-y-4">
                           {logs.map((log) => (
                             <motion.div
@@ -1407,6 +1461,7 @@ export default function People({
                             </motion.div>
                           ))}
                         </div>
+                        )}
                       </div>
                     ) : activeTab === 'media' ? (
                       /* Media Section */
@@ -1480,7 +1535,9 @@ export default function People({
                           )}
                         </AnimatePresence>
 
-                        {personMedia.length === 0 ? (
+                        {(isPendingMedia && personMedia.length === 0) ? (
+                          <NexusPanelLoading label="Medya kanıtları yükleniyor..." className="min-h-[280px] rounded-3xl border border-border/50 bg-secondary/10" />
+                        ) : personMedia.length === 0 ? (
                           <div
                             onClick={() => fileInputRef.current?.click()}
                             className="p-12 text-center border border-dashed border-border rounded-3xl bg-secondary/10 cursor-pointer hover:bg-primary/5 transition-all group"
@@ -1597,22 +1654,44 @@ export default function People({
                       </div>
                     ) : activeTab === 'logs' ? (
                       <div className="space-y-4">
-                        {systemLogs.length === 0 ? (
+                        {isPendingSystemLogs && systemLogs.length === 0 ? (
+                          <div className="space-y-4" aria-busy="true">
+                            <NexusPanelLoading label="Sistem kayıtları yükleniyor..." className="rounded-2xl border border-border/40 bg-secondary/10 py-8" />
+                            {[0, 1, 2].map((k) => (
+                              <div
+                                key={k}
+                                className="rounded-2xl border border-border/50 bg-secondary/20 p-5 shadow-sm"
+                              >
+                                <div className="flex justify-between gap-4 mb-3">
+                                  <div className="h-6 w-28 rounded-lg bg-muted/80 animate-pulse" />
+                                  <div className="h-4 w-32 rounded bg-muted/60 animate-pulse" />
+                                </div>
+                                <div className="space-y-2">
+                                  <div className="h-3 w-full rounded bg-muted/50 animate-pulse" />
+                                  <div className="h-3 w-4/5 rounded bg-muted/40 animate-pulse" />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : systemLogs.length === 0 && !isPendingSystemLogs ? (
                           <div className="flex flex-col items-center justify-center py-20 opacity-20">
                             <History className="w-12 h-12 mb-4" />
                             <p className="text-sm font-bold tracking-widest uppercase">Kayıt Bulunmuyor</p>
                           </div>
                         ) : (
-                          systemLogs.map((log, idx) => (
-                            <motion.div
-                              initial={{ opacity: 0, x: -20 }}
-                              animate={{ opacity: 1, x: 0 }}
+                          <>
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                            Son {PROFILE_SYSTEM_LOGS_LIMIT} kayıt · Tam liste için sol menüden <span className="text-primary">Sistem Logları</span>
+                          </p>
+                          <div className="flex w-full min-w-0 flex-col">
+                          {visibleSystemLogs.map((log, idx) => (
+                            <div
                               key={log.id}
                               id={`log-${log.id}`}
-                              className="group relative pl-8 pb-8 last:pb-0"
+                              className="group relative w-full min-w-0 pl-8 pb-8 last:pb-0"
                             >
                               {/* Timeline Line */}
-                              {idx !== systemLogs.length - 1 && (
+                              {idx !== visibleSystemLogs.length - 1 && (
                                 <div className="absolute left-[11px] top-6 bottom-0 w-[2px] bg-border group-hover:bg-primary/20 transition-colors" />
                               )}
 
@@ -1621,7 +1700,7 @@ export default function People({
                                 <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
                               </div>
 
-                              <div className="bg-secondary/20 border border-border/50 rounded-2xl p-5 hover:bg-secondary/40 transition-all hover:border-primary/20 shadow-sm">
+                              <div className="bg-secondary/20 border border-border/50 rounded-2xl p-5 hover:bg-secondary/40 transition-all hover:border-primary/20 shadow-sm w-full min-w-0 max-w-full">
                                 <div className="flex justify-between items-start mb-3">
                                   <span className="text-[10px] font-black text-primary uppercase tracking-widest bg-primary/10 px-2 py-1 rounded-lg">SİSTEM OTOMASYONU</span>
                                   <span className="text-[10px] font-mono text-muted-foreground opacity-50">{new Date(log.timestamp).toLocaleString('tr-TR')}</span>
@@ -1646,7 +1725,7 @@ export default function People({
                                         const newUrl = getDiscordUrl(userId, newHash, type);
 
                                         return (
-                                          <div className="flex items-center gap-6 py-2 overflow-hidden min-w-0">
+                                          <div className="flex flex-wrap items-center gap-4 sm:gap-6 py-2 overflow-hidden min-w-0 w-full">
                                             {oldUrl && (
                                               <div className="flex flex-col items-center gap-2 shrink-0">
                                                 <div className="text-[9px] font-bold text-muted-foreground uppercase tracking-widest">Önceki</div>
@@ -1676,6 +1755,39 @@ export default function People({
                                               <p className="text-sm font-bold text-foreground truncate">
                                                 {type === 'banner' ? 'Kapak fotoğrafı yenilendi' : 'Profil fotoğrafı yenilendi'}
                                               </p>
+                                            </div>
+                                          </div>
+                                        );
+                                      }
+                                      if (data.type === 'guild') {
+                                        const GuildTagRowSys = ({ label, g, emphasize }) => (
+                                          <div className="space-y-2">
+                                            <span className={cn('text-[9px] font-black uppercase tracking-widest', emphasize ? 'text-primary' : 'text-muted-foreground')}>{label}</span>
+                                            {g && (g.name || g.icon) ? (
+                                              <div className={cn('flex items-center gap-2 px-2 py-1.5 rounded-xl border w-fit max-w-full', emphasize ? 'border-primary/30 bg-primary/5' : 'border-border bg-secondary/30')}>
+                                                {g.icon ? (
+                                                  <img src={g.icon} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+                                                ) : (
+                                                  <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary shrink-0">
+                                                    {(g.name || '?')[0]?.toUpperCase()}
+                                                  </div>
+                                                )}
+                                                <span className="text-xs font-bold tracking-tight truncate">{g.name || '—'}</span>
+                                              </div>
+                                            ) : (
+                                              <div className="text-[10px] font-bold text-destructive uppercase px-2 py-1 bg-destructive/10 rounded-lg border border-destructive/20 w-fit">Yok / Kaldırıldı</div>
+                                            )}
+                                          </div>
+                                        );
+                                        return (
+                                          <div className="space-y-4 py-2 w-full">
+                                            <p className="font-bold text-primary italic uppercase tracking-tighter text-xs">Sunucu etiketi (guild tag) güncellendi</p>
+                                            <div className="flex flex-wrap items-start gap-6 sm:gap-10">
+                                              <GuildTagRowSys label="Eskisi" g={data.old} />
+                                              <div className="hidden sm:flex items-center self-center pt-6">
+                                                <ArrowRight className="w-5 h-5 text-primary/40" />
+                                              </div>
+                                              <GuildTagRowSys label="Yenisi" g={data.new} emphasize />
                                             </div>
                                           </div>
                                         );
@@ -1806,8 +1918,10 @@ export default function People({
                                   );
                                 })()}
                               </div>
-                            </motion.div>
-                          ))
+                            </div>
+                          ))}
+                          </div>
+                          </>
                         )}
                       </div>
                     ) : (
@@ -1819,6 +1933,7 @@ export default function People({
                   </div>
                 </div>
               </motion.div>
+              )}
             </div>
           )}
         </AnimatePresence>,
@@ -2197,6 +2312,208 @@ export default function People({
   )
 }
 
+const PersonModalConnectionsSection = React.memo(function PersonModalConnectionsSection({
+  selectedId,
+  personConnections,
+  people,
+  peopleById,
+  editingConn,
+  setEditingConn,
+  connSearch,
+  setConnSearch,
+  connTarget,
+  setConnTarget,
+  connType,
+  setConnType,
+  addConnection,
+  confirmDeleteId,
+  setConfirmDeleteId,
+  deleteConnection,
+}) {
+  return (
+    <div className="pt-6 border-t border-border space-y-4">
+      <div className="flex justify-between items-center px-1">
+        <h4 className="text-[10px] font-bold text-muted-foreground uppercase tracking-[0.2em] flex items-center gap-2">
+          <LinkIcon className="w-3 h-3 text-primary" /> Bağlantılar
+          {personConnections.length > 0 && (
+            <span className="text-primary text-[10px] font-black tabular-nums">
+              {personConnections.length}
+            </span>
+          )}
+        </h4>
+        <button
+          type="button"
+          onClick={() => setEditingConn(!editingConn)}
+          className="text-[9px] font-bold text-primary hover:underline"
+        >
+          {editingConn ? 'KAPAT' : 'EKLE'}
+        </button>
+      </div>
+
+      {editingConn && (
+        <div className="p-3 bg-secondary/30 rounded-xl border border-primary/20 space-y-3 animate-in fade-in slide-in-from-top-1">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-muted-foreground" />
+            <input
+              type="text"
+              placeholder="İsim, kullanıcı adı veya ID..."
+              className="w-full bg-background border border-border rounded-lg pl-8 pr-3 py-1.5 text-[10px] outline-none focus:border-primary"
+              value={connSearch}
+              onChange={(e) => {
+                setConnSearch(e.target.value);
+                setConnTarget('');
+              }}
+            />
+          </div>
+
+          {connSearch && !connTarget && (() => {
+            const raw = connSearch.trim();
+            const term = raw.toLowerCase();
+            const isFullSnowflake = /^\d{17,22}$/.test(raw);
+            const filtered = people.filter((p) => {
+              if (p.id === selectedId) return false;
+              if (isFullSnowflake) return p.id === raw;
+              return (
+                (p.display_name && p.display_name.toLowerCase().includes(term)) ||
+                (p.username && p.username.toLowerCase().includes(term)) ||
+                (/^\d+$/.test(raw) && p.id.includes(raw))
+              );
+            }).slice(0, 50);
+
+            if (isFullSnowflake && filtered.length === 0) {
+              return (
+                <div className="p-3 text-[10px] text-muted-foreground border border-border rounded-lg bg-background leading-relaxed">
+                  Bu ID veritabanında bulunamadı. Önce kişiyi ekleyin/senkronize edin.
+                </div>
+              );
+            }
+
+            if (filtered.length === 0) return null;
+
+            return (
+              <div className="max-h-60 overflow-y-auto custom-scrollbar border border-border rounded-lg bg-background divide-y divide-border">
+                {filtered.map((p) => (
+                  <button
+                    type="button"
+                    key={p.id}
+                    onClick={() => {
+                      setConnTarget(p.id);
+                      setConnSearch(p.display_name || p.id);
+                    }}
+                    className="w-full flex items-center gap-2 p-2 hover:bg-secondary transition-colors text-left"
+                  >
+                    <img src={discordAvatarUrl(p)} className="w-5 h-5 rounded-full" alt="" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[10px] font-medium truncate">{p.display_name}</p>
+                      <p className="text-[8px] text-muted-foreground/60 font-mono truncate">{p.id}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
+
+          {connTarget && (() => {
+            const target = peopleById.get(connTarget);
+            if (!target) return null;
+            return (
+              <div className="flex items-center gap-2 p-2 bg-primary/5 border border-primary/20 rounded-lg">
+                <img src={discordAvatarUrl(target)} className="w-5 h-5 rounded-full" alt="" />
+                <span className="text-[10px] font-bold text-primary">Seçildi: {target.display_name}</span>
+              </div>
+            );
+          })()}
+
+          <input
+            type="text"
+            placeholder="İlişki (Örn: Arkadaş)"
+            className="w-full bg-background border border-border rounded-lg px-2 py-1.5 text-[10px] outline-none focus:border-primary"
+            value={connType}
+            onChange={(e) => setConnType(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && connTarget && connType) {
+                addConnection({ from_id: selectedId, to_id: connTarget, type: connType, note: '' });
+                setEditingConn(false);
+                setConnTarget('');
+                setConnSearch('');
+                setConnType('Arkadaş');
+              }
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => {
+              if (connTarget && connType) {
+                addConnection({ from_id: selectedId, to_id: connTarget, type: connType, note: '' });
+                setEditingConn(false);
+                setConnTarget('');
+                setConnSearch('');
+                setConnType('Arkadaş');
+              }
+            }}
+            className="w-full bg-primary text-white py-1.5 rounded-lg text-[10px] font-bold hover:scale-[1.02] active:scale-95 transition-all"
+          >
+            BAĞLANTIYI KAYDET
+          </button>
+        </div>
+      )}
+
+      <div className="space-y-2 max-h-[110px] overflow-y-auto custom-scrollbar pr-1 -mr-1">
+        {personConnections.map((conn) => {
+          const otherId = conn.from_id === selectedId ? conn.to_id : conn.from_id;
+          const otherPerson = peopleById.get(otherId);
+          const rowKey = conn.id != null ? `c-${conn.id}` : `${conn.from_id}-${conn.to_id}`;
+          return (
+            <div key={rowKey} className="flex items-center gap-3 p-2 rounded-lg bg-white/5 border border-white/5 group hover:bg-white/10 transition-colors relative">
+              <img src={otherPerson?.avatar ? discordAvatarUrl(otherPerson) : 'https://cdn.discordapp.com/embed/avatars/0.png'} className="w-6 h-6 rounded-full" alt="" />
+              <div className="flex-1 min-w-0">
+                <p className="text-[10px] font-bold truncate">{otherPerson?.display_name || 'Bilinmeyen'}</p>
+                <p className="text-[8px] text-primary font-bold uppercase">{conn.type}</p>
+              </div>
+              {confirmDeleteId === `${conn.from_id}-${conn.to_id}` ? (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="absolute inset-0 bg-background/80 backdrop-blur-md flex flex-col items-center justify-center gap-2 rounded-lg z-20 border border-destructive/20"
+                >
+                  <span className="text-[9px] font-black text-destructive uppercase tracking-widest">Silinsin mi?</span>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => deleteConnection({ from: conn.from_id, to: conn.to_id })}
+                      className="px-3 py-1 bg-destructive text-white rounded-md text-[8px] font-bold hover:bg-destructive/80 transition-colors shadow-lg shadow-destructive/20"
+                    >
+                      SİL
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteId(null)}
+                      className="px-3 py-1 bg-secondary text-foreground rounded-md text-[8px] font-bold hover:bg-secondary/80 transition-colors"
+                    >
+                      İPTAL
+                    </button>
+                  </div>
+                </motion.div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfirmDeleteId(`${conn.from_id}-${conn.to_id}`);
+                  }}
+                  className="absolute right-2 opacity-0 group-hover:opacity-100 p-1.5 hover:bg-destructive/10 rounded-lg text-muted-foreground hover:text-destructive transition-all"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+});
+
 function PersonCard({ p, setSelectedId, getAvatarUrl, getBannerUrl, getDecorationUrl, getShortLocation, setActiveGuildFilter }) {
   const x = useMotionValue(0);
   const y = useMotionValue(0);
@@ -2377,7 +2694,7 @@ function LocationField({ value, onSave }) {
       } else {
         setSuggestions([])
       }
-    }, 500)
+    }, 200)
 
     return () => clearTimeout(timer)
   }, [val, editing])

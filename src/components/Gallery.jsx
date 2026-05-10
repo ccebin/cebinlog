@@ -99,7 +99,7 @@ export default function Gallery({ setView, setSelectedId, setHighlightMediaId })
         setSearchResults({ people: [], media: [] })
         setShowSuggestions(false)
       }
-    }, 500);
+    }, 220);
     return () => clearTimeout(timer);
   }, [search])
 

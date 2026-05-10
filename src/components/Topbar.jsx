@@ -39,7 +39,7 @@ export default function Topbar({ user, view, setView, setSelectedId, setHighligh
         setResults({ people: [], logs: [], media: [] })
         setShowResults(false)
       }
-    }, 300)
+    }, 160)
 
     return () => clearTimeout(timer)
   }, [query])
