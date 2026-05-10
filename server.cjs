@@ -636,6 +636,75 @@ app.post(
   }),
 );
 
+const BULK_IMPORT_MAX_IDS = 500;
+const BULK_IMPORT_DELAY_MS = 350;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+app.post(
+  '/api/people/bulk-import',
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const raw = req.body?.ids;
+    const token = process.env.DISCORD_BOT_TOKEN;
+    if (!token || token === 'YOUR_TOKEN_HERE') {
+      return res.status(400).json({ error: 'Discord bot token yapılandırılmamış.' });
+    }
+
+    let ids = [];
+    if (Array.isArray(raw)) {
+      ids = raw.map((x) => String(x).trim()).filter(Boolean);
+    } else if (typeof raw === 'string') {
+      const matches = raw.match(/\d{17,22}/g);
+      ids = matches || [];
+    }
+
+    ids = [...new Set(ids)];
+    if (ids.length === 0) {
+      return res.status(400).json({ error: 'Geçerli Discord ID bulunamadı (satır veya virgülle ayrılmış 17–22 haneli sayılar).' });
+    }
+    if (ids.length > BULK_IMPORT_MAX_IDS) {
+      return res.status(400).json({ error: `Tek seferde en fazla ${BULK_IMPORT_MAX_IDS} ID gönderilebilir.` });
+    }
+
+    const results = [];
+    let imported = 0;
+    let updated = 0;
+    let failed = 0;
+
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i];
+      try {
+        const syncResult = await syncUserData(id);
+        if (syncResult.isNew) {
+          imported++;
+          results.push({ id, status: 'imported' });
+        } else {
+          updated++;
+          results.push({ id, status: 'updated' });
+        }
+      } catch (err) {
+        failed++;
+        const status = err.response?.status;
+        const msg =
+          status === 404
+            ? 'Discord’da böyle bir kullanıcı yok veya bota görünmüyor.'
+            : err.message || 'Senkronizasyon hatası';
+        results.push({ id, status: 'failed', error: msg });
+      }
+      if (i < ids.length - 1) await sleep(BULK_IMPORT_DELAY_MS);
+    }
+
+    res.json({
+      success: true,
+      summary: { total: ids.length, imported, updated, failed },
+      results,
+    });
+  }),
+);
+
 app.get(
   '/api/people/:id',
   authenticate,
