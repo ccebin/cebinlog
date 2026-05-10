@@ -6,7 +6,7 @@ import { cn } from '../lib/utils'
 import { Users, History, Image as ImageIcon, Activity, X, FileText, User as UserIcon, Tags, MapPin } from 'lucide-react'
 import Linkify from './Linkify'
 import LogRichContent from './LogRichContent'
-import { logContentLooksLikeDeletion, logContentLooksLikeUpload } from '../lib/logDetect'
+import { logContentLooksLikeDeletion, logContentLooksLikeUpload, stripLeadingAuthorFromLogContent } from '../lib/logDetect'
 import { API_BASE, FILE_BASE } from '../lib/apiBase'
 const getHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem('nexus_token')}` })
 
@@ -129,9 +129,7 @@ export default function Dashboard({ user: propUser, setView, setSelectedId, setH
               
               // Extract clean message by removing author name and metadata
               let rawContent = log.content.split('(URL:')[0].trim();
-              if (log.author && rawContent.startsWith(log.author)) {
-                rawContent = rawContent.substring(log.author.length).trim();
-              }
+              rawContent = stripLeadingAuthorFromLogContent(rawContent, log.author);
               // Remove the (Hedef: Name) part
               rawContent = rawContent.replace(/\(Hedef:.*?\)/, '').trim();
 

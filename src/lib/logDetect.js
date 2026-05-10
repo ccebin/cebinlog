@@ -14,3 +14,18 @@ export function logContentLooksLikeUpload(content) {
   if (content.includes('YÜKLEDİ')) return true;
   return /\b(yükledi|medya kanıtı yükledi|yüklenen|kanıt yükledi|yeni medya kanıtı|dosya.*yükledi|yeni kanıt)/i.test(content);
 }
+
+/**
+ * Üstte operatör adı ayrı gösterildiği için içerikten tekrarlayan «İsim, …» önekini kaldırır.
+ * Virgül / iki nokta sonrası sızıntısını da temizler.
+ */
+export function stripLeadingAuthorFromLogContent(content, author) {
+  if (!content || typeof content !== 'string' || !author) return content;
+  const a = String(author).trim();
+  if (!a) return content;
+  const s = content;
+  if (!s.startsWith(a)) return content;
+  let rest = s.slice(a.length);
+  rest = rest.replace(/^[\s,;:]+/, '').trim();
+  return rest || content;
+}

@@ -1,5 +1,5 @@
 import React, { isValidElement } from 'react'
-import { logContentLooksLikeDeletion } from '../lib/logDetect'
+import { logContentLooksLikeDeletion, stripLeadingAuthorFromLogContent } from '../lib/logDetect'
 import { motion, AnimatePresence } from 'framer-motion'
 import { History, User, Activity, Clock, Shield, Search, Image as ImageIcon, Trash2, Video, Mic, FileText, Download, ChevronLeft, ChevronRight, X } from 'lucide-react'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
@@ -449,15 +449,16 @@ export default function Logs({ setView, setSelectedId, setHighlightLogId, setHig
           ) : (
             paginatedLogs.map((log, i) => {
               const isMediaDelete = logContentLooksLikeDeletion(log.content);
+              const isAuto = log.type === 'system' && (log.content.includes('"type"') || log.content.includes('{'));
               const urlMatches = log.content.match(/\(URL: ([^, \)]+)/g) || [];
               const urls = urlMatches.map(m => {
                 const url = m.match(/\(URL: ([^, \)]+)/)[1];
                 return url.startsWith('/uploads') ? `${FILE_BASE}${url}` : url;
               });
-              let cleanContent = log.content.split('(URL:')[0].trim();
-              if (log.author && cleanContent.startsWith(log.author)) {
-                cleanContent = cleanContent.substring(log.author.length).trim();
-              }
+              let cleanContent = stripLeadingAuthorFromLogContent(
+                log.content.split('(URL:')[0].trim(),
+                log.author,
+              );
 
               return (
                 <motion.div
@@ -498,7 +499,9 @@ export default function Logs({ setView, setSelectedId, setHighlightLogId, setHig
                             </div>
                           )}
                         </div>
-                        <span className="text-sm font-bold text-primary">{log.author}</span>
+                        <span className="text-sm font-bold text-primary">
+                          {log.author || (isAuto ? 'Otomatik senkronizasyon' : 'Sistem')}
+                        </span>
                         <span className="text-[10px] font-black uppercase tracking-widest text-muted-foreground/60 bg-secondary/50 px-2 py-0.5 rounded-md border border-border/50">
                           {log.type === 'note' ? 'İstihbarat Notu' : log.is_admin_only ? 'Admin İşlemi' : 'Sistem İşlemi'}
                         </span>
@@ -607,7 +610,6 @@ export default function Logs({ setView, setSelectedId, setHighlightLogId, setHig
                           return content;
                         };
 
-                        const isAuto = log.type === 'system' && (log.content.includes('"type"') || log.content.includes('{'));
                         const formattedMessage = formatLogContent(cleanContent);
                         const richBody = isValidElement(formattedMessage) ? (
                           formattedMessage

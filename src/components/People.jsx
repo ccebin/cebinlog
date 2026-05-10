@@ -17,7 +17,7 @@ import { saveAs } from 'file-saver'
 import html2pdf from 'html2pdf.js'
 import Linkify from './Linkify'
 import LogRichContent from './LogRichContent'
-import { logContentLooksLikeDeletion, logContentLooksLikeUpload } from '../lib/logDetect'
+import { logContentLooksLikeDeletion, logContentLooksLikeUpload, stripLeadingAuthorFromLogContent } from '../lib/logDetect'
 import { API_BASE, FILE_BASE } from '../lib/apiBase'
 const getHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem('nexus_token')}` })
 
@@ -1701,9 +1701,35 @@ export default function People({
                               </div>
 
                               <div className="bg-secondary/20 border border-border/50 rounded-2xl p-5 hover:bg-secondary/40 transition-all hover:border-primary/20 shadow-sm w-full min-w-0 max-w-full">
-                                <div className="flex justify-between items-start mb-3">
-                                  <span className="text-[10px] font-black text-primary uppercase tracking-widest bg-primary/10 px-2 py-1 rounded-lg">SİSTEM OTOMASYONU</span>
-                                  <span className="text-[10px] font-mono text-muted-foreground opacity-50">{new Date(log.timestamp).toLocaleString('tr-TR')}</span>
+                                <div className="flex justify-between items-start mb-3 gap-2">
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    {log.author ? (
+                                      <>
+                                        <div className="w-7 h-7 rounded-full overflow-hidden border border-primary/20 shrink-0">
+                                          {log.author_avatar ? (
+                                            <img
+                                              src={`https://cdn.discordapp.com/avatars/${log.author_discord_id}/${log.author_avatar}.${log.author_avatar.startsWith('a_') ? 'gif' : 'png'}?size=48`}
+                                              alt=""
+                                              className="w-full h-full object-cover"
+                                            />
+                                          ) : (
+                                            <div className="w-full h-full bg-primary/10 flex items-center justify-center">
+                                              <User className="w-3.5 h-3.5 text-primary" />
+                                            </div>
+                                          )}
+                                        </div>
+                                        <span className="text-[11px] font-bold text-primary truncate">{log.author}</span>
+                                        <span className="text-[9px] font-black uppercase tracking-widest text-muted-foreground/80 bg-secondary/50 px-2 py-0.5 rounded-md border border-border/40 shrink-0">
+                                          İşlem yapan
+                                        </span>
+                                      </>
+                                    ) : (
+                                      <span className="text-[10px] font-black text-primary uppercase tracking-widest bg-primary/10 px-2 py-1 rounded-lg">
+                                        Otomatik senkronizasyon
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="text-[10px] font-mono text-muted-foreground opacity-50 shrink-0">{new Date(log.timestamp).toLocaleString('tr-TR')}</span>
                                 </div>
 
                                 {(() => {
@@ -1809,7 +1835,7 @@ export default function People({
                                         <div className="px-3 py-1 bg-secondary border border-border rounded-lg line-through opacity-50 text-xs">{matchOld ? matchOld[1] : '?'}</div>
                                         <ArrowRight className="w-4 h-4 text-primary/40" />
                                         <div className="px-3 py-1 bg-primary/20 border border-primary/30 rounded-lg text-xs font-bold text-primary shadow-sm">{matchNew ? matchNew[1] : '?'}</div>
-                                        <p className="text-sm font-medium text-foreground ml-2">Nickname Değiştirildi</p>
+                                        <p className="text-sm font-medium text-foreground ml-2">Görünen ad değişti</p>
                                       </div>
                                     );
                                   }
@@ -1846,9 +1872,7 @@ export default function People({
                                     // Hide preview for non-admins if it's a delete log
                                     if (isMediaDelete && !isAdmin) {
                                       let plain = content.split('(URL:')[0].trim();
-                                      if (log.author && plain.startsWith(log.author)) {
-                                        plain = plain.substring(log.author.length).trim();
-                                      }
+                                      plain = stripLeadingAuthorFromLogContent(plain, log.author);
                                       return (
                                         <div className="text-sm text-foreground/90 font-medium leading-relaxed">
                                           <LogRichContent content={plain} log={log} setSelectedId={setSelectedId} setView={setView} />
@@ -1858,9 +1882,7 @@ export default function People({
 
                                     // Extract clean message by removing author name and metadata
                                     let message = content.split('(URL:')[0].trim();
-                                    if (log.author && message.startsWith(log.author)) {
-                                      message = message.substring(log.author.length).trim();
-                                    }
+                                    message = stripLeadingAuthorFromLogContent(message, log.author);
 
                                     return (
                                       <div className="space-y-4">
@@ -1907,10 +1929,8 @@ export default function People({
                                     );
                                   }
 
-                                  let plainBody = log.content;
-                                  if (log.author && plainBody.startsWith(log.author)) {
-                                    plainBody = plainBody.substring(log.author.length).trim();
-                                  }
+                                  let plainBody = log.content.split('(URL:')[0].trim();
+                                  plainBody = stripLeadingAuthorFromLogContent(plainBody, log.author);
                                   return (
                                     <div className="text-sm text-foreground/90 font-medium leading-relaxed [overflow-wrap:anywhere] [word-break:break-word]">
                                       <LogRichContent content={plainBody} log={log} setSelectedId={setSelectedId} setView={setView} />

@@ -764,11 +764,15 @@ app.post(
         ],
       );
 
+      const saved = await db.get('SELECT display_name, username FROM people WHERE id = ?', [id]);
+      const dn = saved?.display_name || display_name || username || String(id);
+      const un = saved?.username || username || '—';
+      const targetLabel = `${dn} (@${un})`;
       await addLog(
         id,
         req.user.id,
         'system',
-        `${req.user.display_name}, ${existing ? `${display_name} (@${username}) kaydını güncelledi.` : `${display_name} (@${username}) kaydını sisteme ekledi.`}`,
+        `${req.user.display_name}, ${existing ? `${targetLabel} kaydını güncelledi.` : `${targetLabel} kaydını sisteme ekledi.`}`,
         1,
       );
 
@@ -874,7 +878,7 @@ app.post(
   authenticate,
   asyncHandler(async (req, res) => {
     try {
-      const result = await syncUserData(req.params.id);
+      const result = await syncUserData(req.params.id, { triggeredByUserId: req.user.id });
       const updatedRow = await db.get('SELECT * FROM people WHERE id = ?', [req.params.id]);
       const updatedPerson = secure.decryptPerson(updatedRow);
       res.json({ success: true, person: updatedPerson, ...result });
