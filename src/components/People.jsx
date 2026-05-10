@@ -300,9 +300,14 @@ export default function People({
     saveAs(content, `nexus_archive_${selectedPerson.display_name}.zip`);
   };
 
-  const { data: people = [], isLoading } = useQuery({
+  const {
+    data: people = [],
+    isLoading,
+    isError: peopleQueryError,
+    error: peopleQueryErr,
+  } = useQuery({
     queryKey: ['people'],
-    queryFn: () => axios.get(`${API_BASE}/people`, { headers: getHeaders() }).then(res => res.data)
+    queryFn: () => axios.get(`${API_BASE}/people`, { headers: getHeaders() }).then(res => res.data),
   })
 
   const { data: selectedPerson } = useQuery({
@@ -571,9 +576,28 @@ export default function People({
         </motion.div>
       )}
 
+      {peopleQueryError && (
+        <div className="rounded-2xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          Kişiler yüklenemedi
+          {peopleQueryErr?.response?.status === 401 && ' — oturum süresi dolmuş olabilir; çıkış yapıp tekrar giriş yapın.'}
+          {peopleQueryErr?.response?.status && peopleQueryErr.response.status !== 401 &&
+            ` (HTTP ${peopleQueryErr.response.status})`}
+          {!peopleQueryErr?.response && peopleQueryErr?.message && ` — ${peopleQueryErr.message}`}
+        </div>
+      )}
+
       {isLoading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {[1, 2, 3, 4, 5, 6].map(i => <div key={i} className="h-64 rounded-3xl bg-secondary animate-pulse" />)}
+        </div>
+      ) : peopleQueryError ? null : people.length === 0 ? (
+        <div className="rounded-3xl border border-white/10 bg-white/[0.03] px-8 py-16 text-center">
+          <User className="mx-auto mb-4 h-12 w-12 text-white/20" />
+          <p className="text-sm font-semibold text-white/80">Henüz kayıtlı kişi yok</p>
+          <p className="mt-2 text-xs text-white/40">
+            Discord ile ilk kaydı oluşturduğunuzda burada görünür. Sunucuda kişiler varsa veritabanında{' '}
+            <code className="rounded bg-white/10 px-1">people</code> tablosunu kontrol edin.
+          </p>
         </div>
       ) : (() => {
         const filteredPeople = people.filter(p => {

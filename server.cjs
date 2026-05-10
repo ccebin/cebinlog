@@ -557,7 +557,9 @@ app.get(
   '/api/people',
   authenticate,
   asyncHandler(async (req, res) => {
-    const rows = await db.all('SELECT * FROM people WHERE is_archived = 0 ORDER BY last_updated DESC');
+    const rows = await db.all(
+      'SELECT * FROM people WHERE (is_archived = 0 OR is_archived IS NULL) ORDER BY last_updated DESC',
+    );
     res.json(rows.map((r) => secure.decryptPerson(r)));
   }),
 );
@@ -1459,6 +1461,10 @@ app.get(
 // Üretim: tek Node sürecinde Vite çıktısı (Render ücretsiz web service vb.; VPS gerekmez)
 const distPath = path.join(__dirname, 'dist');
 if (process.env.NODE_ENV === 'production' && fs.existsSync(distPath)) {
+  const publicPath = path.join(__dirname, 'public');
+  if (fs.existsSync(publicPath)) {
+    app.use(express.static(publicPath));
+  }
   app.use(express.static(distPath));
   app.get('*', (req, res) => {
     if (req.path.startsWith('/api')) {
